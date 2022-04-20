@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import sys
+from pygments import highlight
 from rdkit import Chem
 from random import randint
 from copy import deepcopy
@@ -31,9 +32,6 @@ def get_smarts_substructure_from_rdkit_idx(mol, ids):
 def get_atoms_between_rdmol(rdmol, exclusive_wall_ids, seed, inclusive_wall_ids=[]):
     # a fun little function that gets all atom ids until it hits "walls" specified by the user
     wall_ids = [*exclusive_wall_ids, *inclusive_wall_ids]
-    if len(wall_ids) < 1:
-        print("must provide one or more atom ids")
-        return -1
     found = [] # atom ids found that we need not go over again
     active = [seed] # atom ids where the algorithm is currently centered 
     n = 0
@@ -113,10 +111,10 @@ def sample_molecule(pdbfile, subset_size, seed = -1):
     manual_substructure = Chem.DeleteSubstructs(mw, Chem.MolFromSmarts('[#0]'))
 
     # smarts solution using rdkits smarts function
+    [atom.SetAtomMapNum(atom.GetIdx()) for atom in rdmol.GetAtoms()]
     sub_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = rd_ids)
     sub_rdmol = Chem.rdmolfiles.MolFromSmarts(sub_smarts)
     pdb_block = Chem.rdmolfiles.MolToPDBBlock(sub_rdmol)
-
 
     # output the seed location and the selected subset rdmolecule 
 
@@ -212,25 +210,50 @@ def create_smarts_substructure(pdbfile,
     for atom in rdmol.GetAtoms():
         atom.SetProp("atomLabel", atom.GetSymbol())
 
+    rdmol_with_original_map_ids = deepcopy(rdmol)
     new_smarts = None
     smarts_block = None
     selected_atoms = []
 
     if seed != -1:
         selected_atoms = get_atoms_between_rdmol(rdmol, exclusive_wall_ids, seed, inclusive_wall_ids)
-        assert(selected_atoms != -1)
         smarts, rdmol_sub = get_smarts_substructure_from_rdkit_idx(rdmol, ids=selected_atoms)
         if "#" in smarts:  # if smarts uses atomic numbers
             new_smarts, smarts_block = smarts_string_cleaner(smarts)
     
-    return rdmol, new_smarts, smarts_block, list(selected_atoms)
+    #run test to return atoms that are currently able to be assigned
+    assigned_atom_map_ids, _, _ = get_assignments(pdbfile)
+    assigned_atoms_ids = set()
+    unassigned_atoms_ids = set()
+    for atom in rdmol_with_original_map_ids.GetAtoms():
+        if atom.GetAtomMapNum() in assigned_atom_map_ids:
+            assigned_atoms_ids.add(atom.GetIdx())
+        else:
+            unassigned_atoms_ids.add(atom.GetIdx())
+
+    return rdmol_with_original_map_ids, new_smarts, smarts_block, list(selected_atoms), assigned_atoms_ids, unassigned_atoms_ids
+
+def get_assignments(pdbfile):
+    # returns which atoms where assigned in "from_pdb" successfully
+    mol = Molecule.from_pdb(pdbfile)
+    assigned_atoms = set()
+    unassigned_atoms = set()
+    for atom in mol.atoms:
+        if atom.metadata['already_matched']:
+            assigned_atoms.add(atom.molecule_atom_index)
+        else:
+            unassigned_atoms.add(atom.molecule_atom_index)
+    return assigned_atoms, unassigned_atoms, mol
 
 def rdkit_visualize(
         rdmol,
         width=None,
         height=None,
         show_all_hydrogens=True,
-        highlight_ids=[]
+        grey_highlight_ids=[], 
+        yellow_highlight_ids=[],
+        show_3D = False,
+        
     ):
     # a copy of the visualize function from the openff Molecule class
     # avoids having to go through the openforcefield toolkit, which tends
@@ -245,33 +268,68 @@ def rdkit_visualize(
 
     # change rdkit map nums to zero
     rdmol_new = deepcopy(rdmol)
-    [atom.SetAtomMapNum(0) for atom in rdmol_new.GetAtoms()]
 
-    width = 500 if width is None else width
-    height = 300 if height is None else height
-    
-    if not show_all_hydrogens:
-        # updateExplicitCount: Keep a record of the hydrogens we remove.
-        # This is used in visualization to distinguish eg radicals from normal species
-        rdmol_new = RemoveHs(rdmol_new, updateExplicitCount=True)
+    if show_3D == False:
+        [atom.SetAtomMapNum(0) for atom in rdmol_new.GetAtoms()]
 
-    rdDepictor.SetPreferCoordGen(True)
-    rdDepictor.Compute2DCoords(rdmol_new)
-    rdmol_new = rdMolDraw2D.PrepareMolForDrawing(rdmol_new)
+        width = 500 if width is None else width
+        height = 300 if height is None else height
 
-    drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
-    drawer.drawOptions().addAtomIndices = True
-    if len(highlight_ids) > 0:
-        drawer.DrawMolecule(rdmol_new, highlightAtoms=highlight_ids)
+        if not show_all_hydrogens:
+            # updateExplicitCount: Keep a record of the hydrogens we remove.
+            # This is used in visualization to distinguish eg radicals from normal species
+            rdmol_new = RemoveHs(rdmol_new, updateExplicitCount=True)
+
+        rdDepictor.SetPreferCoordGen(True)
+        rdDepictor.Compute2DCoords(rdmol_new)
+        rdmol_new = rdMolDraw2D.PrepareMolForDrawing(rdmol_new)
+
+        drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
+        drawer.drawOptions().addAtomIndices = True
+        if len(grey_highlight_ids) > 0:
+            drawer.DrawMolecule(rdmol_new, highlightAtoms=grey_highlight_ids)
+        else:
+            drawer.DrawMolecule(rdmol_new)
+        drawer.FinishDrawing()
+
+        return SVG(drawer.GetDrawingText())
     else:
-        drawer.DrawMolecule(rdmol_new)
-    drawer.FinishDrawing()
+        # use nglview for this
+        import nglview as nv
 
-    return SVG(drawer.GetDrawingText())
+        # first, assign all atoms to be highlighted to their own ligand group
+        grey_highlighted_info = Chem.AtomPDBResidueInfo()
+        grey_highlighted_info.SetResidueName("asddsf") #completely random name that must be > 5 letters for some reason? 
+
+        yellow_highlighted_info = Chem.AtomPDBResidueInfo()
+        yellow_highlighted_info.SetResidueName("zxcvbn") #completely random name that must be > 5 letters for some reason? 
+
+        unhighlighted_info = Chem.AtomPDBResidueInfo()
+        unhighlighted_info.SetResidueName("sfdfsg") #completely random name that must be > 5 letters for some reason? 
+        for atom in rdmol_new.GetAtoms():
+            if atom.GetIdx() in yellow_highlight_ids:
+                atom.SetMonomerInfo(yellow_highlighted_info)
+            elif atom.GetIdx() in grey_highlight_ids:
+                atom.SetMonomerInfo(grey_highlighted_info)
+            else:
+                atom.SetMonomerInfo(unhighlighted_info)
+
+        # next, construct the viewer         
+        view = nv.show_rdkit(rdmol_new)
+
+        # grey highlights
+        view.add_spacefill(".ASD", opacity=0.4, color="white")
+        view.add_spacefill(".ASD and _H", opacity=0.4, color="red")
+        view.add_spacefill(".ASD and _H", opacity=0.4, color="red")
+
+        #yellow highlights
+        view.add_spacefill(".ZXC", opacity=0.4, color="yellow")
+
+        return view
 
 
 if __name__ == "__main__":
-    path_str = "polymer_examples/rdkit_simple_polymers/naturalrubber.pdb"
+    path_str = "polymer_examples/rdkit_simple_polymers/polyethylene.pdb"
     path_loc = Path(path_str)
     if not path_loc.exists():
         path_loc = Path("openff_polymer_testing/" + path_str)
@@ -279,14 +337,14 @@ if __name__ == "__main__":
         print("could not find path given")
         sys.exit()
 
-    # rdmol, new_smarts, smarts_block, selected_atoms = create_smarts_substructure(str(path_loc), 
-    #                                                                                     exclusive_wall_ids=[], 
-    #                                                                                     seed=20, 
-    #                                                                                     inclusive_wall_ids=[], 
-    #                                                                                     sample_size=70,
-    #                                                                                     sample_seed=-1)
+    rdmol, new_smarts, smarts_block, selected_atoms, assigned_atoms, unassigned_atoms = create_smarts_substructure(str(path_loc), 
+                                                                                        exclusive_wall_ids=[1], 
+                                                                                        seed=20, 
+                                                                                        inclusive_wall_ids=[], 
+                                                                                        sample_size=70,
+                                                                                        sample_seed=-1)
 
-    # print(smarts_block)
-    # print(selected_atoms)
-    # print(new_smarts)
-    # print(rdmol.GetNumAtoms())
+    # view = rdkit_visualize(rdmol, 900, 900, highlight_ids=selected_atoms, show_3D=True)
+    # print(view)
+    print(len(assigned_atoms))
+    print(unassigned_atoms)
