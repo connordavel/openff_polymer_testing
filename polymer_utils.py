@@ -1,5 +1,6 @@
 # Finished class definitions and functions for polymer loading utilities
 
+from email.policy import default
 import sys
 from rdkit import Chem
 from pathlib import Path
@@ -10,9 +11,19 @@ from openff.toolkit.utils import OpenEyeToolkitWrapper
 # from openff.toolkit.utils.toolkits import RDKitToolkitWrapper, OpenEyeToolkitWrapper
 from rdkit import Chem
 from collections import defaultdict
+import py3Dmol
+from IPython.utils import io
+import ipywidgets as widgets
+from IPython.display import Javascript, display, clear_output
 
 class ParsePolymer:
+    instances = {}
     def __init__(self, file):
+        import time
+        # store an instances id to differentiate instances later
+        self.instance_id = int(time.time() * 1000.0)
+        self.__class__.instances[self.instance_id] = self
+        print(self.instance_id)
         # store and load file 
         self.file = file
         self.error_status = False
@@ -40,6 +51,10 @@ class ParsePolymer:
 
         self.full_molecule = rdmol
         self.n_atoms = rdmol.GetNumAtoms()
+        self.atoms_str = None
+        self.atoms_serial_str = None
+        self.bonds_str = None
+        self.double_bond_list = []
 
     def sample_molecule(self, seed=-1, size=80):
         # if seed == -1, when the function will chose a random seed location in the molecule
@@ -137,14 +152,14 @@ class ParsePolymer:
             return view
         else: 
             return mol
-        
+    
     def visualize(self, mode="rdkit", width=500, height=300, show_all_hydrogens=True, highlight_ids=[]):
         # change rdkit map nums to zero
         if not isinstance(self.sampled_molecule, Chem.rdchem.Mol):
             rdmol_new = deepcopy(self.full_molecule)
         else:
             rdmol_new = deepcopy(self.sampled_molecule)
-
+        
         if mode == "rdkit":
             from IPython.display import SVG
             from rdkit.Chem.Draw import (  # type: ignore[import]
@@ -207,7 +222,297 @@ class ParsePolymer:
             view.add_spacefill(".ZXC and _H", opacity=0.4, color="white")
 
             return view 
+        elif mode == "py3Dmol":
+            # for rdmol_new, assign new residue names and atoms names to map between
+            # rdkit and the py3Dmol later
+            # atom names go from H1 to H99, or C1 to C99, etc
+            # residue names go from AAA to ZZZ
+            # this should allow for something like 1382400 hydrogens,carbons,etc
+            element_counts = defaultdict(int)
+            # dictionary for maping map to the rdmol later 
+            map_dict = dict()
+            for atom in rdmol_new.GetAtoms():
+                element_count = element_counts[atom.GetAtomicNum()]
+                res_num = element_count/99
+                atom_num = (element_count%99) + 1
+                res_string = f"{chr(int(res_num/26/26%26)+65)}{chr(int(res_num/26%26)+65)}{chr(int(res_num%26)+65)}"
+                atom.GetPDBResidueInfo().SetName(f"{atom.GetSymbol()}{atom_num:02d}")
+                atom.GetPDBResidueInfo().SetResidueName(res_string)
+                atom.GetPDBResidueInfo().SetResidueNumber(int(res_num) + 1)
+                element_counts[atom.GetAtomicNum()] += 1
+                map_dict[f"{int(res_num) + 1}{atom.GetSymbol()}{atom_num:02d}"] = atom.GetAtomMapNum()
 
+            # create pdb block and view object  
+            pdb_block = Chem.rdmolfiles.MolToPDBBlock(rdmol_new)
+            view = py3Dmol.view(width=width, height=height)
+            view.addModel(pdb_block,'pdb', {"keepH": True})
+            view.setStyle({"model": -1}, {"stick": {}})
+            original_clicker_code = '''function(atom,viewer,event,container) {
+                   if(!atom.label) {
+                        atom.label = viewer.addLabel(atom.atom+":"+atom.serial,{position: atom, backgroundColor: 'mintcream', fontColor:'black', backgroundOpacity: "0.3"});
+                        console.log(Object.getOwnPropertyNames(atom))
+                        console.log(atom.serial)
+                        viewer.setStyle({"serial": atom.serial}, {"stick": {"color": 0xFF0000}})
+                        
+                        atom_data = document.getElementById("atoms_of_class_%d");
+                        var a = atom_data.dataset.atoms;
+                        var s = atom_data.dataset.atoms_serial;
+
+                        var arr = a.split(',');
+                        arr.push(atom.resi.toString() + atom.atom);
+                        atom_data.dataset.atoms = arr;
+
+                        var arr_s = s.split(',');
+                        arr_s.push(atom.serial);
+                        atom_data.dataset.atoms_serial = arr_s;
+                   }
+                   else {
+                        viewer.removeLabel(atom.label);
+                        delete atom.label;
+                        viewer.setStyle({"serial": atom.serial}, {"stick": {"colorscheme": "default"}})
+                        
+                        atom_data = document.getElementById("atoms_of_class_%d");
+                        var a = atom_data.dataset.atoms;
+                        var s = atom_data.dataset.atoms_serial;
+                        var arr = a.split(',');
+                        var arr_s = s.split(',');
+                        
+                        var atom_str = atom.resi.toString() + atom.atom;
+                        arr = arr.filter(function(item) {
+                            return item !== atom_str
+                        })
+                        atom_data.dataset.atoms = arr;
+
+                        arr_s = arr_s.filter(function(item) {
+                            return Number(item) !== atom.serial
+                        })
+                        atom_data.dataset.atoms_serial = arr_s;
+                   }
+                   viewer.render();}''' % (self.instance_id, self.instance_id)
+            view.setClickable({},True,original_clicker_code)
+            # create an html div element to store atom indices
+            code = """
+                    var instance_id = "atoms_of_class_%d";
+                    var element = document.getElementById(instance_id);
+                    if(element){
+                        element.dataset.atoms = []
+                        element.dataset.atoms_serial = []
+                    } else {
+                        var atom = document.createElement("div");
+                        atom.innerHTML = "";
+                        atom.id = instance_id
+                        atom.dataset.atoms = [];
+                        atom.dataset.atoms_serial = [];
+                        document.body.appendChild(atom);
+                    }
+                    """ % (self.instance_id)
+            display(Javascript(code))
+            # button to export atoms
+            clear_button = widgets.Button(description="Clear", button_style="danger")
+            button1 = widgets.Button(description="[#1] Finalize Selection")
+            button2 = widgets.Button(description="[#2] Print Selection")
+            double_bonds_button = widgets.Button(description="Choose Double bonds")
+            output = widgets.Output()
+            
+            def clear_selection(b):
+                code = """
+                        var atom_data = document.getElementById("atoms_of_class_%d");
+                        atom_data.dataset.atoms = []
+                        """ % (self.instance_id)
+                display(Javascript(code))
+                clear_output(wait=False)
+                view.setStyle({"model": -1}, {"stick": {"colorscheme": "default"}})
+                view.removeAllLabels()
+                display(view, widgets.HBox((clear_button, button1, button2,double_bonds_button)), output, display_id=True)
+            def finalize_selection(b):
+                global atoms_str
+                atoms_str = None
+                code = """
+                        var atom_data = document.getElementById("atoms_of_class_%d");
+                        var a = JSON.stringify(atom_data.dataset.atoms);
+                        var s = JSON.stringify(atom_data.dataset.atoms_serial);
+                        Jupyter.notebook.kernel.execute("atoms_str = " + a);
+                        Jupyter.notebook.kernel.execute("ParsePolymer.instances[%d].atoms_str = " + a);
+                        Jupyter.notebook.kernel.execute("ParsePolymer.instances[%d].atoms_serial_str = " + s);
+                        console.log("exporting atom serial ids");
+                        """ % (self.instance_id, self.instance_id, self.instance_id)
+                display(Javascript(code))
+                return
+            def print_selection(b):
+                string = self.atoms_str
+                if string == '':
+                    print("must select some atoms before printing")
+                    return
+                atom_map_ids = [map_dict[i] for i in string.split(",") if i != '']
+                print(atom_map_ids)
+                self.monomer_ids = atom_map_ids
+                new_smarts, smarts_block = self.generate_smarts_entry()
+                print(smarts_block)
+            def double_bonds_click(b):
+                if b.description == "Choose Double bonds": # initiate "choosing double bonds mode"
+                    labels_string = self.atoms_str
+                    serial_string = self.atoms_serial_str
+                    if serial_string == '' or serial_string == None:
+                        print("must select some atoms before attempting to set double bonds")
+                        return
+                    b.description = "Set Double bonds"
+                    b.button_style="warning"
+                    # get old red atoms and labels
+                    atom_serial_ids = [int(i) for i in serial_string.split(",") if i != '']
+                    atom_labels = [i for i in labels_string.split(",") if i != '']
+                    # create new html element that will store which double bonds are clicked
+                    code = """
+                            var instance_id = "atoms_of_class_%d";
+                            var element = document.getElementById(instance_id);
+                            if(element){
+                                element.dataset.double_bonds = [];
+                            } else {
+                                var atom = document.createElement("div");
+                                atom.innerHTML = "";
+                                atom.id = instance_id
+                                atom.dataset.atoms = [];
+                                atom.dataset.double_bonds=[];
+                                document.body.appendChild(atom);
+                            }
+                            """ % (self.instance_id)
+                    display(Javascript(code))
+                    # set new clickable for the view object and reload
+                    code = '''function(atom,viewer,event,container) {
+                        var atom_data = document.getElementById("atoms_of_class_%d");
+                        var s = atom_data.dataset.atoms_serial;
+                        var arr_s = s.split(',');
+                        arr_s = arr_s.filter(function(item) {
+                            return Number(item) == atom.serial
+                        })
+                        if (!!arr_s.length) 
+                        {
+                            if(atom.color == 0xFFFF00) {
+                                    viewer.setStyle({"serial": atom.serial}, {"stick": {"color": 0xFF0000}});
+                                    atom.color = 0xFF0000;
+
+                                    var a = atom_data.dataset.double_bonds;
+                                    var arr = a.split(',');
+                                    
+                                    var atom_str = atom.resi.toString() + atom.atom + ":" + atom.serial + ":" + atom.x + ":" + atom.y + ":" + atom.z;
+                                    arr = arr.filter(function(item) {
+                                        return item !== atom_str;
+                                    })
+                                    atom_data.dataset.double_bonds = arr;
+                            }
+                            else {
+                                    viewer.setStyle({"serial": atom.serial}, {"stick": {"color": 0xFFFF00}});
+                                    atom.color = 0xFFFF00;
+
+                                    var a = atom_data.dataset.double_bonds;
+                                    var arr = a.split(',');
+                                    arr.push(atom.resi.toString() + atom.atom + ":" + atom.serial + ":" + atom.x + ":" + atom.y + ":" + atom.z);
+                                    atom_data.dataset.double_bonds = arr;      
+                            }
+                        }
+                        viewer.render();}''' % (self.instance_id)
+                    view.setClickable({},True,code)
+                    # set all of the old labels and red colors and reload
+                    for label,serial in zip(atom_labels,atom_serial_ids):
+                        #TODO: improve this:
+                        symbol = label
+                        for i in range(0, len(label)):
+                            character = label[i]
+                            if not character.isdigit():
+                                break
+                            symbol = symbol[1:]
+                        view.setStyle({"serial": serial}, {"stick": {"color": 0xFF0000}})
+                        view.addLabel(f"{symbol}:{serial}",{'backgroundColor': 'mintcream', 'fontColor':'black', 'backgroundOpacity': 0.3},{"serial":serial})
+                        
+                    clear_output(wait=False)
+                    display(view, widgets.HBox((clear_button, button1, button2,double_bonds_button)), output, display_id=True)
+
+                elif b.description == "Set Double bonds": # user has chosen double bonds which now need to be set
+                    b.description = "Update Molecule"
+                    b.button_style="warning"
+                    # get the atoms that have been highlighted
+                    code = """
+                            var atom_data = document.getElementById("atoms_of_class_%d");
+                            var b = JSON.stringify(atom_data.dataset.double_bonds);
+                            Jupyter.notebook.kernel.execute("ParsePolymer.instances[%d].bonds_str = " + b);
+                            console.log("exporting atom serial ids");
+                            """ % (self.instance_id, self.instance_id)
+                    display(Javascript(code))
+                elif b.description == "Update Molecule":
+                    b.description = "Choose Double bonds"
+                    b.button_style=""
+                    # resets all colors and labels and represents double bond in the figure
+                    labels_string = self.atoms_str
+                    serial_string = self.atoms_serial_str
+                    # get old red atoms and labels
+                    atom_serial_ids = [int(i) for i in serial_string.split(",") if i != '']
+                    atom_labels = [i for i in labels_string.split(",") if i != '']
+                    # reset the double bonds info in the html
+                    code = """
+                            var instance_id = "atoms_of_class_%d";
+                            var element = document.getElementById(instance_id);
+                            if(element){
+                                element.dataset.double_bonds = [];
+                            } else {
+                                var atom = document.createElement("div");
+                                atom.innerHTML = "";
+                                atom.id = instance_id
+                                atom.dataset.atoms = [];
+                                atom.dataset.double_bonds=[];
+                                document.body.appendChild(atom);
+                            }
+                            """ % (self.instance_id)
+                    display(Javascript(code))
+                    # original code for the clicker
+                    view.setClickable({},True,original_clicker_code)
+                    # set all of the old labels and red colors and reload as was done before
+                    for label,serial in zip(atom_labels,atom_serial_ids):
+                        #TODO: improve this:
+                        symbol = label
+                        for i in range(0, len(label)):
+                            character = label[i]
+                            if not character.isdigit():
+                                break
+                            symbol = symbol[1:]
+                        view.setStyle({"serial": serial}, {"stick": {"color": 0xFF0000}})
+                        view.addLabel(f"{symbol}:{serial}",{'backgroundColor': 'mintcream', 'fontColor':'black', 'backgroundOpacity': 0.3},{"serial":serial})
+                    # get bond information
+                    bonds_list = self.bonds_str.split(",")
+                    bonds_list = [b for b in bonds_list if b != ""]
+                    if len(bonds_list) > 2:
+                        print("can only select two atoms at a time when specifying double bonds")
+                        return
+                    bond1 = bonds_list[0].split(":")
+                    bond2 = bonds_list[1].split(":")
+                    label1 = bond1[0]
+                    label2 = bond2[0]
+                    x1 = float(bond1[2])
+                    y1 = float(bond1[3])
+                    z1 = float(bond1[4])
+                    x2 = float(bond2[2])
+                    y2 = float(bond2[3])
+                    z2 = float(bond2[4])
+
+                    view.addCylinder({"start":{"x":x1,"y":y1,"z":z1},
+                                      "end":{"x":x2,"y":y2,"z":z2},
+                                      "radius": 0.35,
+                                      "fromCap":0,
+                                      "toCap":0,
+                                      "dashed": True,
+                                      "opacity": "0.6"})
+
+                    clear_output(wait=False)
+                    print(x1, y1, z1, x2, y2, z2)
+                    display(view, widgets.HBox((clear_button, button1, button2,double_bonds_button)), output, display_id=True)
+                    # store double bond info in self.double_bond_list
+                    self.double_bond_list.append(tuple(sorted([map_dict[label1],map_dict[label2]])))
+
+            clear_button.on_click(clear_selection)
+            button1.on_click(finalize_selection)
+            button2.on_click(print_selection)
+            double_bonds_button.on_click(double_bonds_click)
+
+            return display(view, widgets.HBox((clear_button, button1, button2,double_bonds_button)), output, display_id=True)
+ 
     def generate_monomer_smarts(self, assign_map_ids_to=[]):
         # if assign_map_ids_to is empty, assume map ids to monomer 
         if len(self.monomer_ids) == 0:
@@ -220,12 +525,23 @@ class ParsePolymer:
             smarts_ids = self.monomer_ids
         else:
             smarts_ids = self.monomer_context_ids
-        n = 1
         if self.sampled_molecule != None:
             rdmol_copy = deepcopy(self.sampled_molecule)
         else:
             rdmol_copy = deepcopy(self.full_molecule)
-
+        # map from atom map numbers to molecule indices
+        smarts_mapped_ids = []
+        # important that this is done in a separate loop
+        for a in rdmol_copy.GetAtoms():
+            if a.GetAtomMapNum() in smarts_ids: # smarts_ids are given as map numbers
+                    smarts_mapped_ids.append(a.GetIdx()) # and must be convered to indices
+                    # ^^this has no effect for unsampled molecules^^
+        if len(self.double_bond_list) > 0:
+            for bond in rdmol_copy.GetBonds():
+                bond_ids = tuple(sorted([bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()]))
+                if bond_ids in self.double_bond_list:
+                    bond.SetBondType(Chem.rdchem.BondType.DOUBLE)
+        n=1
         for a in rdmol_copy.GetAtoms():
             if a.GetAtomMapNum() in smarts_ids:
                 if a.GetAtomMapNum() in assign_map_ids_to:
@@ -233,7 +549,9 @@ class ParsePolymer:
                     n += 1
                 else:
                     a.SetAtomMapNum(0)
-        smarts = Chem.MolFragmentToSmarts(rdmol_copy, atomsToUse = smarts_ids)
+            
+        print(smarts_mapped_ids)
+        smarts = Chem.MolFragmentToSmarts(rdmol_copy, atomsToUse = smarts_mapped_ids)
 
         return smarts, rdmol_copy
         
@@ -390,8 +708,10 @@ class ParsePolymer:
 if __name__ == "__main__":
     file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/naturalrubber.pdb"
     p = ParsePolymer(file)
-    p.monomer_ids = p.generate_ids(102, [79], [])
-    p.monomer_context_ids = p.generate_ids(102, [79], [])
-    entry = p.generate_library_charge_entry()
-    print(entry)
+    # p.monomer_ids = p.generate_ids(102, [79], [])
+    # p.monomer_context_ids = p.generate_ids(102, [79], [])
+    # entry = p.generate_library_charge_entry()
+    # print(entry)
+
+    p.visualize(mode="py3Dmol")
         

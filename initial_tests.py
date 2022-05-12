@@ -1,6 +1,7 @@
 from openff.toolkit.topology.molecule import FrozenMolecule, Molecule
 # from openff.toolkit.utils.toolkits import RDKitToolkitWrapper, OpenEyeToolkitWrapper
 from rdkit import Chem
+from polymer_utils import ParsePolymer
 
 def get_smarts_substructure_from_rdkit_idx(mol, ids):
     rdmol = mol.to_rdkit()
@@ -30,7 +31,7 @@ def get_atoms_between(mol, wall_ids, seed):
             found.append(active_idx)
     return found
 
-mol = Molecule.from_pdb('openff_polymer_testing/polymer_examples/rdkit_simple_polymers/naturalrubber.pdb')
+# mol = Molecule.from_pdb('openff_polymer_testing/polymer_examples/rdkit_simple_polymers/naturalrubber.pdb')
 # mol.generate_conformers()
 # confs = mol._conformers
 # mol._conformers = [mol._conformers[0]]
@@ -39,18 +40,18 @@ mol = Molecule.from_pdb('openff_polymer_testing/polymer_examples/rdkit_simple_po
 # [print(f"{a.molecule_atom_index} {a.atomic_number}") for a in mol.atoms]
 
 # since not all of the residues are assigned and some negative hydrogen atomic number exist 
-assigned_atoms = set()
-for atom in mol.atoms:
-    if atom.atomic_number < 0:
-        atom._atomic_number = -atom.atomic_number
-    dictionary = eval(atom.metadata['dict']) # this is very not good
-    # basically this is a very 
-    try:
-        test = dictionary['already_matched']
-        assigned_atoms.add(atom.molecule_atom_index)
-    except Exception:
-        pass
-print(assigned_atoms)
+# assigned_atoms = set()
+# for atom in mol.atoms:
+#     if atom.atomic_number < 0:
+#         atom._atomic_number = -atom.atomic_number
+#     dictionary = eval(atom.metadata['dict']) # this is very not good
+#     # basically this is a very 
+#     try:
+#         test = dictionary['already_matched']
+#         assigned_atoms.add(atom.molecule_atom_index)
+#     except Exception:
+#         pass
+# print(assigned_atoms)
 
 # now, molecules are ready to be visualized 
 
@@ -59,6 +60,6 @@ print(assigned_atoms)
 # [print(f"{a.GetIdx()} {a.GetAtomicNum()}") for a in rdmol.GetAtoms()]
 
 
-
-
+p = ParsePolymer("polymer_examples/rdkit_simple_polymers/naturalrubber.pdb")
+test=1
 
