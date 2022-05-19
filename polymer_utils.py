@@ -578,13 +578,9 @@ class ParsePolymer:
                 if select[2] in "1234567890": # a two digit atomic number
                     atomic_num_string = select[:3] # select all two digits
                     symbol = atomic_nums[atomic_num_string]
-                    new_smarts = smarts[:i] + symbol + smarts[i+3:]
-                    smarts = new_smarts
                 else:
                     atomic_num_string = select[:2] # select only the single digit
                     symbol = atomic_nums[atomic_num_string]
-                    new_smarts = smarts[:i] + symbol + smarts[i+2:]
-                    smarts = new_smarts
                 # attempt to add a symbol now indexed based on fellow atoms with the same symbol
                 element_counts[symbol] += 1
                 elements_list.append(symbol + str(element_counts[symbol]))
@@ -608,12 +604,12 @@ class ParsePolymer:
         block += "\n\t\""
         block += elements_list[-1]
         block += "\"\n]"
-        return smarts, block
+        return block
 
     def generate_smarts_entry(self):
         smarts,_ = self.generate_monomer_smarts()
-        new_smarts, smarts_block = self._smarts_string_cleaner(smarts)
-        return new_smarts, smarts_block
+        smarts_block = self._smarts_string_cleaner(smarts)
+        return smarts, smarts_block
 
     def generate_library_charges_am1(self, toolkit_registry=OpenEyeToolkitWrapper()):
         # creates charges for a monomer within a context
@@ -708,10 +704,10 @@ class ParsePolymer:
 if __name__ == "__main__":
     file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/naturalrubber.pdb"
     p = ParsePolymer(file)
-    # p.monomer_ids = p.generate_ids(102, [79], [])
-    # p.monomer_context_ids = p.generate_ids(102, [79], [])
-    # entry = p.generate_library_charge_entry()
-    # print(entry)
+    p.monomer_ids = p.generate_ids(102, [79], [])
+    p.monomer_context_ids = p.generate_ids(102, [79], [])
+    smarts, block = p.generate_smarts_entry()
+    print(p.monomer_ids)
 
-    p.visualize(mode="py3Dmol")
+    # p.visualize(mode="py3Dmol")
         
