@@ -1,4 +1,7 @@
+from multiprocessing import connection
+from ntpath import join
 import sys
+from openff.toolkit.utils.toolkit_registry import ToolkitRegistry
 from pyparsing import ParseSyntaxException
 # from pyrsistent import T
 from rdkit import Chem
@@ -19,6 +22,7 @@ import time
 import os
 import tempfile
 import json
+import itertools
 
 import networkx as nx
 from networkx.algorithms import isomorphism
@@ -312,6 +316,7 @@ class SubstructureEngine:
     def __init__(self):
         # a monomer is composed of a name, an rdmol, and a dictionary of metadata
         self.substructures = OrderedDict()
+        self.bond_substructures = OrderedDict()
 
     #input
     def add_substructures_as_sdf(self, name, sdf_file):
@@ -380,12 +385,13 @@ class SubstructureEngine:
             substructure = Substructure(n)
             substructure.atoms = ids_to_include
             substructure.rdmol = rdmol
+            substructure.smarts = Chem.rdmolfiles.MolToSmarts(rdmol)
             substructure_list.append(substructure)
             i += 1
         for substructure in substructure_list:
             self.substructures[substructure.name] = substructure
         return
-    def add_substructures_as_smarts(self, name, smarts, include=[], exclude=[]):
+    def add_substructures_as_smarts(self, name, smarts, include=[], exclude=[], bond=False):
         has_exclude = bool(len(exclude))
         has_include = bool(len(include))
         ids_to_include = []
@@ -407,9 +413,17 @@ class SubstructureEngine:
         substructure = Substructure(name)
         substructure.atoms = ids_to_include
         substructure.rdmol = rdmol
-        self.substructures[name] = substructure
+        substructure.smarts = smarts
+        if bond:
+            self.bond_substructures[name] = substructure
+        else:
+            self.substructures[name] = substructure
         return
-
+    def substructure_name_exists(self, name):
+        for substructure in self.substructures.values():
+            if name == substructure.name:
+                return True
+        return False
     #output
     def get_substructure_smarts_fragment(self, name):
         substructure = self.substructures[name]
@@ -417,9 +431,10 @@ class SubstructureEngine:
         return smarts
     def output_substructures_json(self, file_name):
         json_dict = dict()
-        for name, substructure in self.substructures.items():
+        for name, substructure in [*self.substructures.items(), *self.bond_substructures.items()]:
             # smarts, elements_list
-            smarts = self.get_substructure_smarts_fragment(name)
+            # smarts = self.get_substructure_smarts_fragment(name)
+            smarts = substructure.smarts
             elements_list = []
             symbol_nums = defaultdict(int)
             for atom in substructure.rdmol.GetAtoms():
@@ -443,7 +458,6 @@ class SubstructureEngine:
         with open(file_name, "w") as file:
             json.dump(json_dict, file, indent=4)
 
-
 class NetworkxMonomerEngine(SubstructureEngine):
     def __init__(self):
         import networkx as nx
@@ -453,9 +467,10 @@ class NetworkxMonomerEngine(SubstructureEngine):
         from rdkit import Chem
 
         self.substructures = defaultdict()
+        self.bond_substructures = OrderedDict()
         self.monomers = defaultdict()
 
-    def add_monomer_as_smarts(self, name, smarts, pdb_file, caps):
+    def get_substructures_from_pdb(self, name, smarts, pdb_file, caps):
         # TODO: functioanlity for multiple pdb files
 
         # finds all substructures that match with a given monomer includes 
@@ -472,7 +487,8 @@ class NetworkxMonomerEngine(SubstructureEngine):
         polymer = Chem.rdmolfiles.MolFromPDBFile(pdb_file, removeHs=False)
         substructures = defaultdict()
         
-        is_isomorphic, isomorphisms = self._get_isomorphisms(monomer, pdb_file)
+        is_isomorphic, isomorphisms = self._get_isomorphisms(monomer_unit, pdb_file)
+        captured_isomorphisms = list(isomorphisms)
         if not is_isomorphic:
             print("monomer not found in pdb, no substructures generated")
             return
@@ -480,40 +496,341 @@ class NetworkxMonomerEngine(SubstructureEngine):
         monomer.atoms = atoms_to_use
         monomer.caps = caps
         monomer.rdmol = rdmol # original monomer with caps attached, not monomer_unit
-        monomer.isomorphisms = isomorphisms
+        monomer.isomorphisms = captured_isomorphisms
 
         self.monomers[name] = monomer
-        for mapping in isomorphisms:
-            open_atoms = set() #atoms with an open connection to the rest of the polymer
-            substructure_ids = mapping.keys() # start with the initial isomorphism
-            for idx in mapping.keys():
-                atom = polymer.GetAtomWithIdx(idx)
+        mapped_atoms_dict, mapped_atoms_set = self._get_existing_isomorphic_atoms()
+        unique_substructure_count = 0
+        unique_bond_count = 0
+        for captured_mapping in captured_isomorphisms:
+            open_atoms = dict() #atoms with an open connection to the rest of the polymer
+            substructure_ids = set(captured_mapping.keys()) # start with the initial isomorphism
+            captured_ids = set(captured_mapping.keys())
+            original_ids = set(captured_mapping.keys())
+            for joint_idx in captured_mapping.keys():
+                atom = polymer.GetAtomWithIdx(joint_idx)
                 for neighbor in atom.GetNeighbors():
                     idx = neighbor.GetIdx()
-                    if idx not in mapping.keys():
-                        open_atoms.add(idx)
-                        print(neighbor.GetSymbol())
-            for open_atom in open_atoms:
+                    if idx not in captured_mapping.keys():
+                        open_atoms[idx] = joint_idx
+            for open_atom, joint_atom in open_atoms.items():
                 # extend from the end of the isomorphism until the chain ends or another isomorphism is reached. 
-                pass
+                # use a BFS implementation with (for now) 3 conditions for when to exit:
+                # 1) the end of the graph is reached (usually just a hydrogen) in a reasonable number of nodes (7)
+                # 2) an isomorphism is adjacent, in which case find the entirety of the neighboring monomer
+                queue = [open_atom]
+                visited_atoms = set()
+                searching = True
+                isomorphism_adjacent = False
+                end_reached = False
+                while searching:
+                    current_id = queue[0]
+                    current_atom = polymer.GetAtomWithIdx(current_id)
+                    for neighbor in current_atom.GetNeighbors():
+                        idx = neighbor.GetIdx()
+                        if idx not in visited_atoms and idx not in substructure_ids:
+                            queue.append(current_id)
+                    queue.pop(0)
+                    visited_atoms.add(current_id)
+                    # now test for if the search can stop
+                    # condition 1: the end of the graph is more than 7 atoms away:
+                    if len(visited_atoms) > 7:
+                        searching = False
+                    # condition 2: the end of the graph is reached
+                    elif len(queue) == 0:
+                        searching = False
+                        end_reached = True
+                    # condition 3: an isomorphism is adjacenet 
+                    elif current_id in mapped_atoms_set:
+                        searching = False
+                        isomorphism_adjacent = True
+                if isomorphism_adjacent:
+                    # find which monomer unit is adjacent and use that monomer unit as the non-captured atoms
+                    # additionally, a unique "bond_substructure" must be created that represents bonds between monomers 
+                    most_unique_adjacency = set()
+                    union_length = 999999
+                    for monomer in self.monomers.values():
+                        isomorphisms = monomer.isomorphisms
+                        for mapping in isomorphisms:
+                            ids = set(mapping.keys())
+                            if open_atom in ids:
+                                if len(ids.union(original_ids)) < union_length:
+                                    most_unique_adjacency = ids
+                    if most_unique_adjacency == None:
+                        print("error 3")
+                    # for now, assume the adjacent monomer is directly adjacent
+                    substructure_ids = substructure_ids | most_unique_adjacency
+
+                    # finally, create a bond substructure between the most unique adjacency and original_ids
+                    # TODO: how to not have to assume that these are single bonds!
+                    polymer_copy = deepcopy(polymer)
+                    # unspecified bonds except for the inter-monomer bond
+                    for atom in polymer_copy.GetAtoms():
+                        atom.SetAtomMapNum(0)
+                    bond = polymer_copy.GetBondBetweenAtoms(open_atom, joint_atom)
+                    bond.GetBeginAtom().SetAtomMapNum(1)
+                    bond.GetEndAtom().SetAtomMapNum(1)
+
+                    bond_smarts = Chem.MolFragmentToSmarts(polymer_copy, atomsToUse = (most_unique_adjacency|original_ids))
+                    bond_smarts = bond_smarts.replace(".", "~")
+                    query_mol = Chem.rdmolfiles.MolFromSmarts(bond_smarts)
+                    is_new, isomorphic_bond = self._substructure_is_new(query_mol, bond=True)
+                    # check for uniqueness. replace smaller bonds with larger bonds if isomorphic
+                    if is_new:
+                        unique_bond_count += 1
+                        # is_new, isomorphic_bond = self._substructure_is_new(query_mol)
+                        self.add_substructures_as_smarts(f"{name}_bond_{unique_bond_count}", bond_smarts, bond=True)
+                    else:
+                        old_bond = isomorphic_bond.rdmol
+                        if query_mol.GetNumAtoms() > old_bond.GetNumAtoms():
+                            self.bond_substructures.pop(isomorphic_substructure.name)
+                            self.add_substructures_as_smarts(f"{name}_bond_{unique_bond_count}", bond_smarts, bond=True)
+
+                elif end_reached:
+                    substructure_ids = substructure_ids | set(visited_atoms)
+                    captured_ids = captured_ids | set(visited_atoms)
+                else: # either the end of the molecule or no isomorphisms in site (for now, this is bad)
+                    substructure_ids = substructure_ids | set(visited_atoms) # ids of captured + non-captured atoms
+                    # captured_ids defined above 
+            # now substructure_ids and captured_ids should be updated to include larger context
+
+            polymer_copy = deepcopy(polymer)
+            n = 1
+            # assign chemical information and atom map nums
+            for atom in polymer_copy.GetAtoms():
+                if atom.GetIdx() in captured_ids:
+                    atom.SetAtomMapNum(n)
+                    n += 1
+                    if atom.GetIdx() in captured_mapping.keys():
+                        substructure_atom = monomer_unit.GetAtomWithIdx(captured_mapping[atom.GetIdx()])
+                        atom.SetFormalCharge(substructure_atom.GetFormalCharge())
+            for bond in polymer_copy.GetBonds():
+                a1 = bond.GetBeginAtomIdx()
+                a2 = bond.GetEndAtomIdx()
+                if a1 in captured_mapping.keys() and a2 in captured_mapping.keys():
+                    bond.SetBondType(monomer_unit.GetBondBetweenAtoms(captured_mapping[a1], captured_mapping[a2]).GetBondType())
+                else:
+                    bond.SetBondType(Chem.rdchem.BondType.UNSPECIFIED)
+            substructure_smarts = Chem.MolFragmentToSmarts(polymer_copy, atomsToUse = substructure_ids)
+            query_mol = Chem.rdmolfiles.MolFromSmarts(substructure_smarts)
+            is_new, isomorphic_substructure = self._substructure_is_new(query_mol)
+            # check for uniqueness. replace smaller substructures with larger substructures if isomorphic
+            if is_new:
+                unique_substructure_count += 1
+                # is_new, isomorphic_substructure = self._substructure_is_new(query_mol)
+                self.add_substructures_as_smarts(f"{name}_{unique_substructure_count}", substructure_smarts)
+            else:
+                old_substructure = isomorphic_substructure.rdmol
+                if query_mol.GetNumAtoms() > old_substructure.GetNumAtoms():
+                    self.substructures.pop(isomorphic_substructure.name)
+                    unique_substructure_count += 1
+                    self.add_substructures_as_smarts(f"{name}_{unique_substructure_count}", substructure_smarts)
         return
+    
+    def get_substructures_from_connection_dict(self, name, smarts, connection_dict, caps, custom_end_groups=defaultdict(set), inter_monomer_bond_type=Chem.BondType.SINGLE):
+        # test case #1: {1:2}, rubber
+        # finds substructs and places caps into sets identified by what map number the cap is attached to
+        rdmol = Chem.rdmolfiles.MolFromSmarts(smarts)
+        terminal_groups = custom_end_groups
+        atoms_to_use = []
+        for atom in rdmol.GetAtoms():
+            idx = atom.GetIdx()
+            if idx not in caps:
+                atoms_to_use.append(idx)
+        # now find capping groups
+        
+        for atom in rdmol.GetAtoms():
+            map_num = atom.GetAtomMapNum()
+            idx = atom.GetIdx()
+            if map_num > 0:
+                # start searching for the end of the monomer in the direction of the capping atoms
+                terminal_group_ids = set()
+                first_cap = None
+                for neighbor in atom.GetNeighbors():
+                    if neighbor.GetIdx() in caps:
+                        first_cap = neighbor.GetIdx()
+                        break
+                searching_list = [first_cap]
+                terminal_group_ids = set([first_cap])
+                while len(searching_list) != 0:
+                    current_id = searching_list.pop(0)
+                    if current_id in caps:
+                        terminal_group_ids.add(current_id)
+                    current_atom = rdmol.GetAtomWithIdx(current_id)
+                    for neighbor in current_atom.GetNeighbors():
+                        neighbor_id = neighbor.GetIdx()
+                        if neighbor_id not in terminal_group_ids and neighbor_id in caps:
+                            searching_list.append(neighbor_id)
+                terminal_groups[map_num] = terminal_group_ids
+        # now to assemble all combinations of monomers and end_groups
+        # this combines information from the connection_dict and terminal_groups 
+        # dictionaries. 
+        side_groups = defaultdict(list)
+        for head, tails in connection_dict.items():
+            # tails can be a list for multiple tail groups
+            if isinstance(tails, list):
+                for tail in tails:
+                    side_groups[head].append(tail)
+                    if head in terminal_groups.keys():
+                        side_groups[head].append(terminal_groups[head])
+                    side_groups[tail].append(head)
+                    if tail in terminal_groups.keys():
+                        side_groups[tail].append(terminal_groups[tail])
+            else:
+                tail = tails
+                side_groups[head].append(tail)
+                if head in terminal_groups.keys():
+                    side_groups[head].append(terminal_groups[head])
+                side_groups[tail].append(head)
+                if tail in terminal_groups.keys():
+                    side_groups[tail].append(terminal_groups[tail])
+        # make dict into a list
+        groups_list = []
+        for head, tails in side_groups.items():
+            sub_list = []
+            for tail in tails:
+                sub_list.append(tuple([head, tail]))
+            groups_list.append(sub_list)
+        # now iterate through all multiples of the side_groups to create substructures
+        unique_substructure_count = 1
+        for iters in itertools.product(*groups_list):
+            # for each side group, build the substructure
+            monomer_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = atoms_to_use)
+            sub_rdmol = Chem.rdmolfiles.MolFromSmarts(monomer_smarts)
+            # identify the middle atoms for capturing atoms later:
+            for atom in sub_rdmol.GetAtoms():
+                atom.SetBoolProp("captured", True)
+            for side_group in iters:
+                head, tail = side_group
+                if isinstance(tail, int):
+                    middle_monomer_unit = True
+                else:
+                    middle_monomer_unit = False
+                # add the tail to the mutable rdmol
+                if middle_monomer_unit:
+                    middle_rdmol = Chem.rdmolfiles.MolFromSmarts(monomer_smarts) # the neighboring rdmol
+                    for atom in middle_rdmol.GetAtoms():
+                        atom.SetAtomMapNum(-1 * atom.GetAtomMapNum()) # neg to differentiate head from tail
+                        atom.SetBoolProp("captured", False)
+                    # connect middle_rdmol to mutable_rdmol at the connection point map nums
+                    # find start and end point for bond:
+                    sub_rdmol = Chem.CombineMols(sub_rdmol, middle_rdmol)
+                    # add bond based on connection dict
+                    for atom in sub_rdmol.GetAtoms():
+                        map_num = atom.GetAtomMapNum()
+                        if map_num == head:
+                            start_id = atom.GetIdx()
+                        if map_num == -tail:
+                            end_id = atom.GetIdx()
+                    editable_mol = Chem.EditableMol(sub_rdmol)
+                    editable_mol.AddBond(start_id, end_id ,order=Chem.rdchem.BondType.SINGLE)
+                    sub_rdmol = editable_mol.GetMol()
+                    for atom in sub_rdmol.GetAtoms():
+                        if atom.GetAtomMapNum() < 0:
+                            atom.SetAtomMapNum(0)
+                else:
+                    # add the end group
+                    # first, find which cap is "open", ie. bonded to the atom with >0 AtomMapNum
+                    open_cap = 0
+                    found = False
+                    for cap_id in tail:
+                        atom = rdmol.GetAtomWithIdx(cap_id)
+                        for neighbor in atom.GetNeighbors():
+                            if neighbor.GetAtomMapNum() > 0:
+                                open_cap = cap_id
+                                found = True
+                                break
+                        if found: # break early
+                            break
+                    cap_rdmol = deepcopy(rdmol)
+                    for atom in cap_rdmol.GetAtoms():
+                        if atom.GetIdx() == open_cap:
+                            atom.SetAtomMapNum(1)
+                        else:
+                            atom.SetAtomMapNum(0)
+                    cap_smarts = Chem.rdmolfiles.MolFragmentToSmarts(cap_rdmol, atomsToUse = list(tail))
+                    cap_rdmol = Chem.rdmolfiles.MolFromSmarts(cap_smarts)
+                    for atom in cap_rdmol.GetAtoms():
+                        atom.SetAtomMapNum(-1 * atom.GetAtomMapNum())
+                        atom.SetBoolProp("captured", True)
+                    sub_rdmol = Chem.CombineMols(sub_rdmol, cap_rdmol)
+                    for atom in sub_rdmol.GetAtoms():
+                        map_num = atom.GetAtomMapNum()
+                        if map_num == head:
+                            start_id = atom.GetIdx()
+                        if map_num == -1:
+                            end_id = atom.GetIdx()
+                    editable_mol = Chem.EditableMol(sub_rdmol)
+                    editable_mol.AddBond(start_id, end_id ,order=Chem.rdchem.BondType.SINGLE)
+                    sub_rdmol = editable_mol.GetMol()
+                    for atom in sub_rdmol.GetAtoms():
+                        if atom.GetAtomMapNum() < 0:
+                            atom.SetAtomMapNum(0)
+            # create substructure entry
+            n = 1
+            for atom in sub_rdmol.GetAtoms():
+                if atom.GetBoolProp("captured"):
+                    atom.SetAtomMapNum(n)
+                    n += 1
+            substructure_smarts = Chem.rdmolfiles.MolToSmarts(sub_rdmol)
+            print(substructure_smarts)
+            self.add_substructures_as_smarts(f"{name}_{unique_substructure_count}", substructure_smarts)  
+            unique_substructure_count += 1
+        # iterate through once more to create bond smarts
+        bond_entries = []
+        for start, end in connection_dict.items():
+            bond = {start, end}
+            if bond not in bond_entries:
+                bond_entries.append(bond)
+        unique_bond_count = 1
+        for bond in bond_entries:
+            start, end = bond
+            monomer_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = atoms_to_use)
+            sub_rdmol1 = Chem.rdmolfiles.MolFromSmarts(monomer_smarts)
+            sub_rdmol2 = Chem.rdmolfiles.MolFromSmarts(monomer_smarts)
+            for atom in sub_rdmol2.GetAtoms():
+                atom.SetAtomMapNum(-1 * atom.GetAtomMapNum())
+            sub_rdmol = Chem.CombineMols(sub_rdmol1, sub_rdmol2)
+            # add bond based on connection dict
+            for atom in sub_rdmol.GetAtoms():
+                map_num = atom.GetAtomMapNum()
+                if map_num == start:
+                    start_id = atom.GetIdx()
+                if map_num == -end:
+                    end_id = atom.GetIdx()
+            editable_mol = Chem.EditableMol(sub_rdmol)
+            editable_mol.AddBond(start_id, end_id, order=inter_monomer_bond_type)
+            sub_rdmol = editable_mol.GetMol()
+            for atom in sub_rdmol.GetAtoms():
+                if atom.GetIdx() in [start_id, end_id]:
+                    atom.SetAtomMapNum(1)
+                else:
+                    atom.SetAtomMapNum(0)
+            substructure_smarts = Chem.rdmolfiles.MolToSmarts(sub_rdmol)
+            print(substructure_smarts)
+            self.add_substructures_as_smarts(f"{name}_bond_{unique_bond_count}", substructure_smarts, bond=True)
+            unique_bond_count += 1
+
+    def build_polymer_from_connection_dict(self, name, smarts, connection_dict, caps, custom_end_groups=defaultdict(set), length=10):
+        return
+
     def _get_existing_isomorphic_atoms(self):
         # returns a list of atom ids that have already been mapped
         mapped_atoms_dict = defaultdict()
         mapped_atoms_list = []
         
-        for monomer in self.monomers:
+        for monomer in self.monomers.values():
             isomorphic_atoms_list = []
             for mapping in monomer.isomorphisms:
-                isomorphic_atoms_list = isomorphic_atoms_list + mapping.keys()
+                isomorphic_atoms_list = isomorphic_atoms_list + list(mapping.keys())
             isomorphic_atoms = set(isomorphic_atoms_list)
             mapped_atoms_dict[monomer.name] = isomorphic_atoms
-            mapped_atoms_list = mapped_atoms_list + isomorphic_atoms
+            mapped_atoms_list = mapped_atoms_list + list(isomorphic_atoms)
         mapped_atoms_set = set(mapped_atoms_list)
 
         return mapped_atoms_dict, mapped_atoms_set
 
-    def _get_isomorphisms(self, query, pdb_file):
+    def _get_isomorphisms(self, query, structure):
         # returns an isomorphism map using networkx from query to structure where 
         # both query and structure are rdkit molecules 
         def _rdmol_to_networkx(rdmol):
@@ -647,19 +964,229 @@ class NetworkxMonomerEngine(SubstructureEngine):
             else:
                 return False
 
-        from openmm.app import PDBFile
-        pdb = PDBFile(pdb_file)
+        if isinstance(structure, str):
+            if ".pdb" in structure or ".PDB" in structure:
+                from openmm.app import PDBFile
+                pdb = PDBFile(structure)
 
-        rdmol_G = _rdmol_to_networkx(query)
-        omm_topology_G = _openmm_topology_to_networkx(pdb.topology)
-        GM = isomorphism.GraphMatcher(
-            omm_topology_G, rdmol_G, node_match=node_match
-        )
-        return GM.subgraph_is_isomorphic(), GM.subgraph_isomorphisms_iter()
+                rdmol_G = _rdmol_to_networkx(query)
+                omm_topology_G = _openmm_topology_to_networkx(pdb.topology)
+                GM = isomorphism.GraphMatcher(
+                    omm_topology_G, rdmol_G, node_match=node_match
+                )
+                return GM.subgraph_is_isomorphic(), GM.subgraph_isomorphisms_iter()
+            else:
+                return -1, -1
+        elif isinstance(structure, Chem.rdchem.Mol):
+            rdmol_G = _rdmol_to_networkx(query)
+            structure_G = _rdmol_to_networkx(structure)
+            GM = isomorphism.GraphMatcher(
+                structure_G, rdmol_G, node_match=node_match
+            )
+            return GM.subgraph_is_isomorphic(), GM.subgraph_isomorphisms_iter()
+        else:
+            return -1, -1
+
+    def _substructure_is_new(self, query_mol, bond=False):
+        if bond:
+            substructures = self.bond_substructures
+        else:
+            substructures = self.substructures
+
+        is_unique = True
+        isomorphic_substructure = None
+        for sub in substructures.values():
+            sub_mol = sub.rdmol
+            is_isomorphic_forwards, isomorphisms = self._get_isomorphisms(sub_mol, query_mol)
+            is_isomorphic_backwards, isomorphisms = self._get_isomorphisms(query_mol, sub_mol)
+            if is_isomorphic_forwards or is_isomorphic_backwards:
+                is_unique = False
+                isomorphic_substructure = sub
+                break
+        return is_unique, isomorphic_substructure
+
+class PolymerNetworkRepresentation():
+    # stores polymer connectivity information as a Networkx graph
+    def __init__(self):
+        self.graph = nx.Graph()
+        self.length = 0
+        self.open_nodes = []
+    
+    def add_monomer_randomly(self, bond_info = {}):
+        # places a new monomer onto a random dangling edge, if possible
+        found_connection = False
+        if self.length == 0:
+            found_connection = True
+            self.graph.add_node(
+                self.length,
+                open_bonds = list(bond_info.keys()),
+                terminal_group = False
+            )
+            self.open_nodes.append(self.length)
+            self.length += 1
+            
+        else:
+            # must now find an open edge that is able to accept a bond from the incoming monomer 
+            for open_node in self.open_nodes:
+                open_bonds = self.graph.nodes[open_node]['open_bonds']
+                new_monomer_attachment = -1
+                existing_attachment = -1
+                for bond_key, attachment_values in bond_info.items():
+                    if isinstance(attachment_values, set):
+                        # a set means that this bond is an end group
+                        continue
+                    if isinstance(attachment_values, int):
+                        attachment_values = [attachment_values]
+                    matches = set(attachment_values) & set(open_bonds)
+                    if len(matches) > 0:
+                        # choose the first match
+                        match = matches.pop()
+                        # so, open_bonds contains match, and bond_info looks like: {bond_key: [..., match, ...]}
+                        new_monomer_attachment = bond_key
+                        existing_attachment = match
+                    else:
+                        continue
+                if new_monomer_attachment == -1:
+                    continue
+                # first, remove existing_attachment from open_bonds attribute of open_node
+                open_bonds.remove(match)
+                if len(open_bonds) == 0:
+                    self.open_nodes.remove(open_node)
+                self.graph.nodes[open_node]['open_bonds'] = open_bonds
+                # next, create a new node 
+                new_node_open_bonds = list(bond_info.keys()).remove(new_monomer_attachment)
+                self.graph.add_node(
+                    self.length,
+                    open_bonds = new_node_open_bonds,
+                    terminal_group = False
+                )
+                if len(new_node_open_bonds) > 0:
+                    self.open_nodes.append(self.length)
+                # finally, add an edge between the nodes
+                self.graph.add_edge(
+                    open_node,
+                    self.length,
+                    bond_info = {open_node: existing_attachment, self.length: new_monomer_attachment}
+                    )
+                added_monomer_id = self.length
+                self.length += 1
+
+                # if there exist any edge groups, add them here
+                for bond_key, attachment_values in bond_info.items():
+                    if isinstance(attachment_values, set):
+                        self.graph.add_node(
+                            self.length,
+                            open_bonds = [],
+                            terminal_group = True,
+                            terminal_group_ids = attachment_values
+                        )
+                        self.graph.add_edge(
+                            added_monomer_id,
+                            self.length,
+                            bond_info = {added_monomer_id: bond_key, self.length: attachment_values}
+                        )
+                        self.length += 1
+                found_connection = True
+                
+        return found_connection
+
+    def complete_monomer(self, terminal_group_id_dict):
+        # finds dangling edges and turns them into end groups 
+        for open_node in self.open_nodes:
+            open_bonds = self.graph.nodes[open_node]['open_bonds']
+            for open_bond in open_bonds:
+                # add a new node and edge
+                if open_bond in terminal_group_id_dict.keys():
+                    open_bond_terminal_group = terminal_group_id_dict[open_bond]
+                    self.graph.add_node(
+                        self.length,
+                        open_bonds = [],
+                        terminal_group = True,
+                        terminal_group_ids = open_bond_terminal_group
+                    )
+                    self.graph.add_edge(
+                        open_node,
+                        self.length,
+                        bond_info = {open_node: open_bond, self.length: open_bond_terminal_group}
+                    )
+                    self.length += 1
+                else:
+                    print(f"missing terminal group information for bond number: {open_bond}")
+                    continue
+        return
+
+    def to_adjacency_matrix(self):
+        return
+    def from_adjacency_matrix(self, matrix):
+        return
+
+class BruteForceParameterEstimator(NetworkxMonomerEngine):
+    # calculates the charges and parameters from an entire pdb file loaded with substructures
+    # and estimates parameter info for a set of the given substructures
+    def __init__(self, pdb_file):
+        self.substructures = defaultdict()
+        self.bond_substructures = defaultdict()
+        self.substructure_properties = defaultdict()
+        self.monomers = defaultdict()
+        self.pdb_file = pdb_file
+        self.monomer_charge_maps = defaultdict()
+
+    def get_elf10_charge_estimates(self):
+        # computes elf10 charges for the entire pdb and averages charges to give library charges
+        # for each of the substructures
+        if len(self.substructures) == 0:
+            print("need existing substructures to estimate charges")
+            return None, None
+        self.output_substructures_json("substructures.json")
+        mol = Molecule.from_pdb(self.pdb_file, "substructures.json")
+        mol = [mol, *mol.enumerate_stereoisomers(max_isomers=2, toolkit_registry=OpenEyeToolkitWrapper())][-1]
+        mol.assign_partial_charges(partial_charge_method='am1bccelf10', toolkit_registry=OpenEyeToolkitWrapper())
+        struct_rdmol = mol.to_rdkit()
+        # now, group partial charges by isomorphisms
+        monomer_charge_maps = dict() # a dict of dicts
+        # structure: {<monomer name>: {0:<charge>, 1:<charge>, 2:<charge>,...}, <monomer_name>: {...}, ...}
+        for substructure in self.substructures.values():
+            sub_rdmol = substructure.rdmol
+            is_isomorphic, isomorphisms = self._get_isomorphisms(sub_rdmol, struct_rdmol)
+            captured_isomorphisms = list(isomorphisms)
+            charge_dict = defaultdict(list)
+            for captured_mapping in captured_isomorphisms:
+                for struct_idx, sub_idx in captured_mapping.items():
+                    charge_dict[sub_idx].append(mol.partial_charges[struct_idx])
+            # average charges that map to the same substructure atoms
+            averaged_charge_dict = defaultdict(int)
+            for id, charges in charge_dict.items():
+                avg = sum(charges)/len(charges)
+                averaged_charge_dict[id] = avg
+            monomer_charge_maps[substructure.name] = averaged_charge_dict
+        self.monomer_charge_maps = monomer_charge_maps
+        return monomer_charge_maps
+
+    def generate_library_charge_entry(self, name):
+        substruct = self.substructures[name]
+        charges_dict = dict()
+        if len(self.monomer_charge_maps) == 0:
+            self.monomer_charge_maps = self.get_elf10_charge_estimates() # charges map to ids, not atom map nums
+        custom_charges = self.monomer_charge_maps[name]
+        for atom_id in custom_charges.keys():
+            atom = substruct.rdmol.GetAtomWithIdx(atom_id)
+            map_num = atom.GetAtomMapNum()
+            if map_num > 0:
+                charges_dict[map_num] = custom_charges[atom_id]
+
+        # create a library charge entry 
+        entry_string = "<LibraryCharge smirks=\"" + substruct.smarts + "\""
+        for map_num, charge in charges_dict.items():
+            charge_string = f"{charge:.8g}"
+            charge_string = charge_string.replace(" ", " * ")
+            entry_string = entry_string + f" charge{map_num}=\"" + charge_string + "\""
+        entry_string = entry_string + "></LibraryCharge>"
+        return entry_string
 
 class Substructure:
     def __init__(self, name):
         self.name = name
+        self.smarts = ""
         self.atoms = []
         self.rdmol = None
 
@@ -1281,11 +1808,14 @@ if __name__ == "__main__":
     # engine2.add_monomers_as_sdf(['end1', 'end2', 'middle'], "test_monomers.sdf")
     # engine2.output_substructures_json("sdf_test.json")
 
+    smarts = "[C:1](-[H])(-[H])(-[H])-[O]-[C:2](-[H])(-[H])(-[H])"
+    pdb_file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEO.pdb"
+    substruct_file = "automatic_PEO_substructures.json"
+    charges_file_name = "PEO_charges.txt"
+
     engine = NetworkxMonomerEngine()
-    smarts = "[C:1](-[H:2])(-[H:3])(-[H:4])-[C:5](-[H:6])=[C:7](-[C:8](-[H:9])(-[H:10])(-[H:11]))-[C:12](-[H:13])(-[H:14])(-[H:15])"
-    pdb_file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/naturalrubber.pdb"
-    engine.add_monomer_as_smarts("rubber", smarts, pdb_file, [2,14])
-    #  name, smarts, pdb_file, caps
+    engine.get_substructures_from_connection_dict("PEO", smarts, {1:2}, [1,7])
+    engine.output_substructures_json(substruct_file)
 
 # takeaways from 6/9 meeting:
 # need to go from "monomer info" to a fully parameterized pdb file with substructures, and the 

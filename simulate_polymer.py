@@ -14,11 +14,12 @@ from openff.toolkit.topology import Topology
 from openff.toolkit.typing.engines.smirnoff import ForceField
 import numpy
 import time
+import parmed
 
-def simulate_polymer(pdbfile, offxml_file, output):
+def simulate_polymer(pdbfile, substructure_file, offxml_file, output):
     # mol should already have one conformer...
 
-    mol_conf = Molecule.from_pdb(str(path_loc))
+    mol_conf = Molecule.from_pdb(str(path_loc), substructure_file)
     pdbfile = PDBFile(pdbfile)
     omm_topology = pdbfile.topology
 
@@ -56,7 +57,8 @@ def simulate_polymer(pdbfile, offxml_file, output):
     return st, difference
 
 if __name__ == "__main__":
-    path_str = "polymer_examples/rdkit_simple_polymers/naturalrubber.pdb"
+    path_str = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEO.pdb"
+    substructure_file = "automatic_PEO_substructures.json"
     path_loc = Path(path_str)
     if not path_loc.exists():
         path_loc = Path("openff_polymer_testing/" + path_str)
@@ -64,11 +66,11 @@ if __name__ == "__main__":
         print("could not find path given")
         sys.exit()
 
-    offxml_file = 'openff_unconstrained_no_library_charges_1.3.0.offxml'
-    st, diff = simulate_polymer(str(path_loc), offxml_file, "natural_rubber_traj_no_library_charges")
+    offxml_file = 'openff_unconstrained_no_library_charges-2.0.0.offxml'
+    st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_no_library_charges")
     print(f"time to create openmm system: {diff}")
 
-    offxml_file = 'openff_unconstrained_with_library_charges_1.3.0.offxml'
-    st, diff = simulate_polymer(str(path_loc), offxml_file, "natural_rubber_traj_with_library_charges")
+    offxml_file = 'openff_unconstrained_with_library_charges-2.0.0.offxml'
+    st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_with_library_charges")
     print(f"time to create openmm system: {diff}")
 
