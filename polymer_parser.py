@@ -30,6 +30,8 @@ from openmm import unit as openmm_unit
 from openmm.app import PDBFile
 from rdkit import Chem
 
+import matplotlib.pyplot as plt
+
 class ChemistryEngine:
     instances = {}
     def __init__(self, file, name=""):
@@ -811,8 +813,109 @@ class NetworkxMonomerEngine(SubstructureEngine):
             self.add_substructures_as_smarts(f"{name}_bond_{unique_bond_count}", substructure_smarts, bond=True)
             unique_bond_count += 1
 
-    def build_polymer_from_connection_dict(self, name, smarts, connection_dict, caps, custom_end_groups=defaultdict(set), length=10):
+    def build_random_polymer_from_connection_dict(self, name, smarts, connection_dict, caps, custom_end_groups=defaultdict(set), inter_monomer_bond_type=Chem.BondType.SINGLE, length=10):
+        # first, for each atom map num in the smarts, try to find an adjacent element in the connection_dict
+        # note that elements in the connection dict are symmetric and work both ways 
+        # test case #1: {1:2}, rubber
+        # finds substructs and places caps into sets identified by what map number the cap is attached to
+        rdmol = Chem.rdmolfiles.MolFromSmarts(smarts)
+        terminal_groups = custom_end_groups
+        atoms_to_use = []
+        for atom in rdmol.GetAtoms():
+            idx = atom.GetIdx()
+            if idx not in caps:
+                atoms_to_use.append(idx)
+        # now find capping groups
+        for atom in rdmol.GetAtoms():
+            map_num = atom.GetAtomMapNum()
+            idx = atom.GetIdx()
+            if map_num > 0:
+                # start searching for the end of the monomer in the direction of the capping atoms
+                terminal_group_ids = set()
+                first_cap = None
+                for neighbor in atom.GetNeighbors():
+                    if neighbor.GetIdx() in caps:
+                        first_cap = neighbor.GetIdx()
+                        break
+                searching_list = [first_cap]
+                terminal_group_ids = set([first_cap])
+                while len(searching_list) != 0:
+                    current_id = searching_list.pop(0)
+                    if current_id in caps:
+                        terminal_group_ids.add(current_id)
+                    current_atom = rdmol.GetAtomWithIdx(current_id)
+                    for neighbor in current_atom.GetNeighbors():
+                        neighbor_id = neighbor.GetIdx()
+                        if neighbor_id not in terminal_group_ids and neighbor_id in caps:
+                            searching_list.append(neighbor_id)
+                terminal_groups[map_num] = terminal_group_ids
+        # add bond info from atom map numbers found in the rdmol
+        bond_info = []
+        for atom in rdmol.GetAtoms():
+            if atom.GetAtomMapNum() > 0:
+                adjacency_list = self._search_connection_dict(connection_dict, atom.GetAtomMapNum())
+                adjacency = adjacency_list[0] # for now, just choose the first option
+                if adjacency == -999:
+                    print("unable to build monomer from given connection_dict")
+                    return
+                else:
+                    bond_info.append(tuple([atom.GetAtomMapNum(), adjacency]))
+        # construct a monomer randomly with the given bond info and complete the 
+        # polymer using information of the terminal_groups 
+        residue_connectivity_engine = PolymerNetworkRepresentation()
+        for i in range(0, length):
+            residue_connectivity_engine.add_monomer_randomly(name, bond_info=bond_info)
+        residue_connectivity_engine.complete_monomer(terminal_groups)
+        # to go from macroscopic residue resolution to atomistic resolution
+        monomer_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = atoms_to_use)
+        sub_rdmol = Chem.rdmolfiles.MolFromSmarts(monomer_smarts)
+        # general format for builing the polymer:
+        # positive AtomMapNum -> connection still needed
+        # negative AtomMapNum -> connection made 
+        polymer = Chem.Mol()
+        atom_connection_points = {}
+        for node in residue_connectivity_engine.graph.nodes:
+            polymer, polymer_map_dict, added_map_dict = self._combine_mols(polymer, sub_rdmol)
+            atom_connection_points[node] = added_map_dict
+        # now fill in the connections between the monomers
+        for edge in residue_connectivity_engine.graph.edges:
+            pass
         return
+    def _combine_mols(self, rdmol1, rdmol2):
+        for atom in rdmol1.GetAtoms():
+            atom.SetIntProp(1, "MolId")
+        for atom in rdmol2.GetAtoms():
+            atom.SetIntProp(2, "MolId")
+        new_mol = Chem.CombineMols(rdmol1, rdmol2)
+        map_dict1 = {}
+        map_dict2 = {}
+        for atom in new_mol.GetAtoms():
+            mol_id = atom.GetIntProp("MolId")
+            if atom.GetAtomMapNum() == 0:
+                continue # not interested in 0 atom map nums 
+            elif mol_id == 1:
+                map_dict1[atom.GetIdx()] = atom.GetAtomMapNum()
+            elif mol_id == 2:
+                map_dict2[atom.GetIdx()] = atom.GetAtomMapNum()
+        
+        return new_mol, map_dict1, map_dict2
+
+    def _search_connection_dict(self, connection_dict, search_value):
+        # utility function that searches a connection dict and returns the
+        # matching adjacent connection
+        for key, value in connection_dict.items():
+            if key == search_value:
+                if isinstance(value, list):
+                    return value
+                else:
+                    return [value]
+            elif isinstance(value, list):
+                if search_value in value:
+                    return [key]
+            elif isinstance(value, int):
+                if value == search_value:
+                    return [key]
+        return [-999]
 
     def _get_existing_isomorphic_atoms(self):
         # returns a list of atom ids that have already been mapped
@@ -1012,14 +1115,16 @@ class PolymerNetworkRepresentation():
         self.length = 0
         self.open_nodes = []
     
-    def add_monomer_randomly(self, bond_info = {}):
+    def add_monomer_randomly(self, name, bond_info = []):
         # places a new monomer onto a random dangling edge, if possible
         found_connection = False
+        bond_info_keys = [a for a,_ in bond_info]
         if self.length == 0:
             found_connection = True
             self.graph.add_node(
                 self.length,
-                open_bonds = list(bond_info.keys()),
+                name = name,
+                open_bonds = list(bond_info_keys),
                 terminal_group = False
             )
             self.open_nodes.append(self.length)
@@ -1031,7 +1136,7 @@ class PolymerNetworkRepresentation():
                 open_bonds = self.graph.nodes[open_node]['open_bonds']
                 new_monomer_attachment = -1
                 existing_attachment = -1
-                for bond_key, attachment_values in bond_info.items():
+                for bond_key, attachment_values in bond_info:
                     if isinstance(attachment_values, set):
                         # a set means that this bond is an end group
                         continue
@@ -1044,6 +1149,7 @@ class PolymerNetworkRepresentation():
                         # so, open_bonds contains match, and bond_info looks like: {bond_key: [..., match, ...]}
                         new_monomer_attachment = bond_key
                         existing_attachment = match
+                        break
                     else:
                         continue
                 if new_monomer_attachment == -1:
@@ -1054,9 +1160,11 @@ class PolymerNetworkRepresentation():
                     self.open_nodes.remove(open_node)
                 self.graph.nodes[open_node]['open_bonds'] = open_bonds
                 # next, create a new node 
-                new_node_open_bonds = list(bond_info.keys()).remove(new_monomer_attachment)
+                new_node_open_bonds = list(bond_info_keys)
+                new_node_open_bonds.remove(new_monomer_attachment)
                 self.graph.add_node(
                     self.length,
+                    name = name,
                     open_bonds = new_node_open_bonds,
                     terminal_group = False
                 )
@@ -1072,7 +1180,8 @@ class PolymerNetworkRepresentation():
                 self.length += 1
 
                 # if there exist any edge groups, add them here
-                for bond_key, attachment_values in bond_info.items():
+                new_open_bonds = self.graph.nodes[added_monomer_id]["open_bonds"]
+                for bond_key, attachment_values in bond_info:
                     if isinstance(attachment_values, set):
                         self.graph.add_node(
                             self.length,
@@ -1085,15 +1194,20 @@ class PolymerNetworkRepresentation():
                             self.length,
                             bond_info = {added_monomer_id: bond_key, self.length: attachment_values}
                         )
+                        new_open_bonds.remove(bond_key)
                         self.length += 1
+                self.graph.nodes[added_monomer_id]["open_bonds"] = new_open_bonds
                 found_connection = True
+                break
                 
         return found_connection
 
     def complete_monomer(self, terminal_group_id_dict):
         # finds dangling edges and turns them into end groups 
+        final_open_nodes = deepcopy(self.open_nodes)
         for open_node in self.open_nodes:
             open_bonds = self.graph.nodes[open_node]['open_bonds']
+            final_open_bonds = deepcopy(open_bonds)
             for open_bond in open_bonds:
                 # add a new node and edge
                 if open_bond in terminal_group_id_dict.keys():
@@ -1110,9 +1224,13 @@ class PolymerNetworkRepresentation():
                         bond_info = {open_node: open_bond, self.length: open_bond_terminal_group}
                     )
                     self.length += 1
+                    final_open_bonds.remove(open_bond)
                 else:
                     print(f"missing terminal group information for bond number: {open_bond}")
                     continue
+            self.graph.nodes[open_node]['open_bonds'] = final_open_bonds
+            final_open_nodes.remove(open_node)
+        self.open_nodes = final_open_nodes
         return
 
     def to_adjacency_matrix(self):
@@ -1813,9 +1931,23 @@ if __name__ == "__main__":
     substruct_file = "automatic_PEO_substructures.json"
     charges_file_name = "PEO_charges.txt"
 
-    engine = NetworkxMonomerEngine()
-    engine.get_substructures_from_connection_dict("PEO", smarts, {1:2}, [1,7])
-    engine.output_substructures_json(substruct_file)
+    engine = PolymerNetworkRepresentation()
+
+    for i in range(0,1000):
+        engine.add_monomer_randomly("PEO", [(1,2), (2,1), (3,4)])
+    for i in range(0,3000):
+        engine.add_monomer_randomly("ahh", [(4,3), (3,4)])
+
+    engine.complete_monomer({1: {9}, 2:{5}, 3:{12}})
+    graph = engine.graph
+    labels_dict = {}
+    for node in graph.nodes:
+        if graph.nodes[node]["terminal_group"] == True:
+            labels_dict[node] = graph.nodes[node]["terminal_group_ids"]
+        else:
+            labels_dict[node] = f"{node}, {graph.nodes[node]['open_bonds']}"
+    nx.draw(graph, pos = nx.kamada_kawai_layout(graph), with_labels=True, labels=labels_dict)
+    plt.savefig("bla.png")
 
 # takeaways from 6/9 meeting:
 # need to go from "monomer info" to a fully parameterized pdb file with substructures, and the 
