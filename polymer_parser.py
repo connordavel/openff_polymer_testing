@@ -1,12 +1,7 @@
-from multiprocessing import connection
-from ntpath import join
-import sys
 from openff.toolkit.utils.toolkit_registry import ToolkitRegistry
-from pyparsing import ParseSyntaxException
 # from pyrsistent import T
 from rdkit import Chem
 from pathlib import Path
-from random import randint
 from copy import deepcopy
 from openff.toolkit.topology.molecule import Molecule
 from openff.toolkit.utils import OpenEyeToolkitWrapper
@@ -15,7 +10,6 @@ from rdkit import Chem
 from collections import defaultdict, OrderedDict
 from collections.abc import Iterable
 import py3Dmol
-from IPython.utils import io
 import ipywidgets as widgets
 from IPython.display import Javascript, display, clear_output
 import time
@@ -29,6 +23,7 @@ from networkx.algorithms import isomorphism
 from openmm import unit as openmm_unit
 from openmm.app import PDBFile
 from rdkit import Chem
+import numpy as np
 
 import matplotlib.pyplot as plt
 
@@ -472,39 +467,70 @@ class NetworkxMonomerEngine(SubstructureEngine):
         self.bond_substructures = OrderedDict()
         self.monomers = defaultdict()
 
-    def get_substructures_from_pdb(self, name, smarts, pdb_file, caps):
+    def get_substructures_from_pdb(self, monomer_info, pdb_file):
         # TODO: functioanlity for multiple pdb files
 
         # finds all substructures that match with a given monomer includes 
         # specific noncaptured atoms for each substructure
-        rdmol = Chem.rdmolfiles.MolFromSmarts(smarts)
-        # remove the caps:
-        atoms_to_use = []
-        for atom in rdmol.GetAtoms():
-            idx = atom.GetIdx()
-            if idx not in caps:
-                atoms_to_use.append(idx)
-        monomer_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = atoms_to_use)
-        monomer_unit = Chem.rdmolfiles.MolFromSmarts(monomer_smarts)
         polymer = Chem.rdmolfiles.MolFromPDBFile(pdb_file, removeHs=False)
-        substructures = defaultdict()
-        
-        is_isomorphic, isomorphisms = self._get_isomorphisms(monomer_unit, pdb_file)
-        captured_isomorphisms = list(isomorphisms)
-        if not is_isomorphic:
-            print("monomer not found in pdb, no substructures generated")
-            return
-        monomer = Monomer(name)
-        monomer.atoms = atoms_to_use
-        monomer.caps = caps
-        monomer.rdmol = rdmol # original monomer with caps attached, not monomer_unit
-        monomer.isomorphisms = captured_isomorphisms
+        nonspecific_isomorphisms = []
+        isomorphism_sets = []
+        for name, monomer_capped_smarts in monomer_info.items():
+            smarts, caps = monomer_capped_smarts
+            rdmol = Chem.rdmolfiles.MolFromSmarts(smarts)
+            # remove the caps:
+            atoms_to_use = []
+            for atom in rdmol.GetAtoms():
+                idx = atom.GetIdx()
+                if idx not in caps:
+                    atoms_to_use.append(idx)
+            monomer_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = atoms_to_use)
+            monomer_unit = Chem.rdmolfiles.MolFromSmarts(monomer_smarts)
+            substructures = defaultdict()
+            
+            is_isomorphic, isomorphisms = self._get_isomorphisms(monomer_unit, pdb_file)
+            for isomorph in isomorphisms:
+                iso_set = set(isomorph.keys())
+                if iso_set not in isomorphism_sets:
+                    isomorphism_sets.append(iso_set)
+                    nonspecific_isomorphisms.append(tuple([name, isomorph]))
+            if not is_isomorphic:
+                print("monomer not found in pdb, no substructures generated")
+                return
+            monomer = Monomer(name)
+            monomer.atoms = atoms_to_use
+            monomer.caps = caps
+            monomer.rdmol = rdmol # original monomer with caps attached, not monomer_unit
+            monomer.monomer_unit = monomer_unit
+            self.monomers[name] = monomer
 
-        self.monomers[name] = monomer
+        # map isomorphisms to the molecule so that they are specific/nonoverlapping
+        isomorphism_ids = []
+        for data in nonspecific_isomorphisms:
+            name, isomorphisms = data
+            isomorphism_ids.append(list(isomorphisms.keys()))
+        
+        polymer_networkx = self._rdmol_to_networkx(polymer)
+        adj_matrix = nx.to_numpy_matrix(polymer_networkx).astype(int)
+
+        chosen_ids = find_fitting_lists(isomorphism_ids, adj_matrix)
+        specific_isomorphisms = []
+        captured_isomorphisms_dict = defaultdict(list)
+        for entry, id in zip(nonspecific_isomorphisms, range(0, len(nonspecific_isomorphisms))):
+            if id in chosen_ids:
+                name, isomorph = entry
+                captured_isomorphisms_dict[name].append(isomorph)
+                specific_isomorphisms.append(entry)
+        nonspecific_isomorphisms = None
+
+        for name, monomer in self.monomers.items():
+            monomer.isomorphisms = captured_isomorphisms_dict[name]
+
         mapped_atoms_dict, mapped_atoms_set = self._get_existing_isomorphic_atoms()
         unique_substructure_count = 0
         unique_bond_count = 0
-        for captured_mapping in captured_isomorphisms:
+        for name, captured_mapping in specific_isomorphisms:
+            monomer_unit = self.monomers[name].monomer_unit
             open_atoms = dict() #atoms with an open connection to the rest of the polymer
             substructure_ids = set(captured_mapping.keys()) # start with the initial isomorphism
             captured_ids = set(captured_mapping.keys())
@@ -531,7 +557,7 @@ class NetworkxMonomerEngine(SubstructureEngine):
                     for neighbor in current_atom.GetNeighbors():
                         idx = neighbor.GetIdx()
                         if idx not in visited_atoms and idx not in substructure_ids:
-                            queue.append(current_id)
+                            queue.append(idx)
                     queue.pop(0)
                     visited_atoms.add(current_id)
                     # now test for if the search can stop
@@ -629,11 +655,11 @@ class NetworkxMonomerEngine(SubstructureEngine):
                     self.add_substructures_as_smarts(f"{name}_{unique_substructure_count}", substructure_smarts)
         return
     
-    def get_substructures_from_connection_dict(self, name, smarts, connection_dict, caps, custom_end_groups=defaultdict(set), inter_monomer_bond_type=Chem.BondType.SINGLE):
+    def get_substructures_from_connections(self, name, smarts, connection_dict, caps, inter_monomer_bond_type=Chem.BondType.SINGLE):
         # test case #1: {1:2}, rubber
         # finds substructs and places caps into sets identified by what map number the cap is attached to
         rdmol = Chem.rdmolfiles.MolFromSmarts(smarts)
-        terminal_groups = custom_end_groups
+        terminal_groups =defaultdict(set)
         atoms_to_use = []
         for atom in rdmol.GetAtoms():
             idx = atom.GetIdx()
@@ -813,13 +839,15 @@ class NetworkxMonomerEngine(SubstructureEngine):
             self.add_substructures_as_smarts(f"{name}_bond_{unique_bond_count}", substructure_smarts, bond=True)
             unique_bond_count += 1
 
-    def build_random_polymer_from_connection_dict(self, name, smarts, connection_dict, caps, custom_end_groups=defaultdict(set), inter_monomer_bond_type=Chem.BondType.SINGLE, length=10):
+    def build_random_polymer_from_connection_dict(self, name, smarts, connection_dict, caps, inter_monomer_bond_type=Chem.BondType.SINGLE, length=10):
         # first, for each atom map num in the smarts, try to find an adjacent element in the connection_dict
         # note that elements in the connection dict are symmetric and work both ways 
         # test case #1: {1:2}, rubber
         # finds substructs and places caps into sets identified by what map number the cap is attached to
         rdmol = Chem.rdmolfiles.MolFromSmarts(smarts)
-        terminal_groups = custom_end_groups
+        terminal_groups = defaultdict(set)
+        terminal_groups_first_cap = defaultdict(tuple)
+        first_caps = defaultdict(set)
         atoms_to_use = []
         for atom in rdmol.GetAtoms():
             idx = atom.GetIdx()
@@ -849,6 +877,8 @@ class NetworkxMonomerEngine(SubstructureEngine):
                         if neighbor_id not in terminal_group_ids and neighbor_id in caps:
                             searching_list.append(neighbor_id)
                 terminal_groups[map_num] = terminal_group_ids
+                terminal_groups_first_cap[map_num] = (first_cap, terminal_group_ids)
+                first_caps[first_cap] = terminal_group_ids
         # add bond info from atom map numbers found in the rdmol
         bond_info = []
         for atom in rdmol.GetAtoms():
@@ -875,17 +905,82 @@ class NetworkxMonomerEngine(SubstructureEngine):
         polymer = Chem.Mol()
         atom_connection_points = {}
         for node in residue_connectivity_engine.graph.nodes:
-            polymer, polymer_map_dict, added_map_dict = self._combine_mols(polymer, sub_rdmol)
-            atom_connection_points[node] = added_map_dict
+            if not residue_connectivity_engine.graph.nodes[node]['terminal_group']:
+                polymer, polymer_map_dict, added_map_dict = self._combine_mols(polymer, sub_rdmol)
+                atom_connection_points[node] = added_map_dict
+            else:
+                terminal_group_ids = residue_connectivity_engine.graph.nodes[node]['terminal_group_ids']
+                cap_rdmol = deepcopy(rdmol)
+                for atom in cap_rdmol.GetAtoms():
+                    if atom.GetIdx() in first_caps.keys():
+                        atom.SetAtomMapNum(1)
+                    else:
+                        atom.SetAtomMapNum(0)
+                cap_smarts = Chem.MolFragmentToSmarts(cap_rdmol, atomsToUse = list(terminal_group_ids))
+                cap_rdmol = Chem.rdmolfiles.MolFromSmarts(cap_smarts)
+                polymer, polymer_map_dict, added_map_dict = self._combine_mols(polymer, cap_rdmol)
+                atom_connection_points[node] = added_map_dict
         # now fill in the connections between the monomers
+        editable_mol = Chem.EditableMol(polymer)
         for edge in residue_connectivity_engine.graph.edges:
-            pass
-        return
+            bond_info = residue_connectivity_engine.graph.get_edge_data(*edge)['bond_info']
+            # because we don't yet have more complex residues info, for now,
+            # just use single bonds to connect edges
+            n1, n2 = edge
+            n1_connection_num = bond_info[n1]
+            n2_connection_num = bond_info[n2]
+            if isinstance(n1_connection_num, set) or isinstance(n2_connection_num, set):
+                if isinstance(n1_connection_num, set):
+                    n_cap = n1
+                    n_mon = n2
+                    cap_ids = n1_connection_num
+                    adjacency_num = n2_connection_num
+                else:
+                    n_cap = n2
+                    n_mon = n1
+                    cap_ids = n2_connection_num
+                    adjacency_num = n1_connection_num
+
+                n_cap_connection_id_map = atom_connection_points[n_cap]
+                for key, value in n_cap_connection_id_map.items():
+                    if value == 1: # always, but good to check
+                        start = key
+                n_cap_connection_id_map.pop(start)
+                atom_connection_points[n_cap] = n_cap_connection_id_map
+
+                n_mon_connection_id_map = atom_connection_points[n_mon]
+                for key, value in n_mon_connection_id_map.items():
+                    if value == adjacency_num:
+                        end = key
+                n_mon_connection_id_map.pop(end)
+                atom_connection_points[n_mon] = n_mon_connection_id_map
+
+            else:
+                n1_connection_id_map = atom_connection_points[n1]
+                n2_connection_id_map = atom_connection_points[n2]
+                # find the first value that matches the bond_info
+                start = -1
+                end = -1
+                for key, value in n1_connection_id_map.items():
+                    if value == n1_connection_num:
+                        start = key
+                n1_connection_id_map.pop(start)
+                atom_connection_points[n1] = n1_connection_id_map
+                for key, value in n2_connection_id_map.items():
+                    if value == n2_connection_num:
+                        end = key
+                n2_connection_id_map.pop(end)
+                atom_connection_points[n2] = n2_connection_id_map
+
+            editable_mol.AddBond(start, end, order=inter_monomer_bond_type)
+
+        return editable_mol.GetMol(), residue_connectivity_engine.graph
+
     def _combine_mols(self, rdmol1, rdmol2):
         for atom in rdmol1.GetAtoms():
-            atom.SetIntProp(1, "MolId")
+            atom.SetIntProp("MolId", 1)
         for atom in rdmol2.GetAtoms():
-            atom.SetIntProp(2, "MolId")
+            atom.SetIntProp("MolId", 2)
         new_mol = Chem.CombineMols(rdmol1, rdmol2)
         map_dict1 = {}
         map_dict2 = {}
@@ -933,55 +1028,56 @@ class NetworkxMonomerEngine(SubstructureEngine):
 
         return mapped_atoms_dict, mapped_atoms_set
 
+    def _rdmol_to_networkx(self, rdmol):
+        _bondtypes = {
+            # 0: Chem.BondType.AROMATIC,
+            Chem.BondType.SINGLE: 1,
+            Chem.BondType.AROMATIC: 1.5,
+            Chem.BondType.DOUBLE: 2,
+            Chem.BondType.TRIPLE: 3,
+            Chem.BondType.QUADRUPLE: 4,
+            Chem.BondType.QUINTUPLE: 5,
+            Chem.BondType.HEXTUPLE: 6,
+        }
+        rdmol_G = nx.Graph()
+        n_hydrogens = [0] * rdmol.GetNumAtoms()
+        for atom in rdmol.GetAtoms():
+            atomic_number = atom.GetAtomicNum()
+            # Assign sequential negative numbers as atomic numbers for hydrogens attached to the same heavy atom.
+            # We do the same to hydrogens in the protein graph. This makes it so we
+            # don't have to deal with redundant self-symmetric matches.
+            if atomic_number == 1:
+                heavy_atom_idx = atom.GetNeighbors()[0].GetIdx()
+                n_hydrogens[heavy_atom_idx] += 1
+                atomic_number = -1 * n_hydrogens[heavy_atom_idx]
+            
+            rdmol_G.add_node(
+                atom.GetIdx(),
+                atomic_number=atomic_number,
+                formal_charge=atom.GetFormalCharge(),
+                map_num=atom.GetAtomMapNum()
+            )
+            # These substructures (and only these substructures) should be able to overlap previous matches.
+            # They handle bonds between substructures.
+        for bond in rdmol.GetBonds():
+            bond_type = bond.GetBondType()
+
+            # All bonds in the graph should have been explicitly assigned by this point.
+            if bond_type == Chem.rdchem.BondType.UNSPECIFIED:
+                raise Exception
+                # bond_type = Chem.rdchem.BondType.SINGLE
+                # bond_type = Chem.rdchem.BondType.AROMATIC
+                # bond_type = Chem.rdchem.BondType.ONEANDAHALF
+            rdmol_G.add_edge(
+                bond.GetBeginAtomIdx(),
+                bond.GetEndAtomIdx(),
+                bond_order=_bondtypes[bond_type],
+            )
+        return rdmol_G
+    
     def _get_isomorphisms(self, query, structure):
         # returns an isomorphism map using networkx from query to structure where 
         # both query and structure are rdkit molecules 
-        def _rdmol_to_networkx(rdmol):
-            _bondtypes = {
-                # 0: Chem.BondType.AROMATIC,
-                Chem.BondType.SINGLE: 1,
-                Chem.BondType.AROMATIC: 1.5,
-                Chem.BondType.DOUBLE: 2,
-                Chem.BondType.TRIPLE: 3,
-                Chem.BondType.QUADRUPLE: 4,
-                Chem.BondType.QUINTUPLE: 5,
-                Chem.BondType.HEXTUPLE: 6,
-            }
-            rdmol_G = nx.Graph()
-            n_hydrogens = [0] * rdmol.GetNumAtoms()
-            for atom in rdmol.GetAtoms():
-                atomic_number = atom.GetAtomicNum()
-                # Assign sequential negative numbers as atomic numbers for hydrogens attached to the same heavy atom.
-                # We do the same to hydrogens in the protein graph. This makes it so we
-                # don't have to deal with redundant self-symmetric matches.
-                if atomic_number == 1:
-                    heavy_atom_idx = atom.GetNeighbors()[0].GetIdx()
-                    n_hydrogens[heavy_atom_idx] += 1
-                    atomic_number = -1 * n_hydrogens[heavy_atom_idx]
-                
-                rdmol_G.add_node(
-                    atom.GetIdx(),
-                    atomic_number=atomic_number,
-                    formal_charge=atom.GetFormalCharge(),
-                    map_num=atom.GetAtomMapNum()
-                )
-                # These substructures (and only these substructures) should be able to overlap previous matches.
-                # They handle bonds between substructures.
-            for bond in rdmol.GetBonds():
-                bond_type = bond.GetBondType()
-
-                # All bonds in the graph should have been explicitly assigned by this point.
-                if bond_type == Chem.rdchem.BondType.UNSPECIFIED:
-                    raise Exception
-                    # bond_type = Chem.rdchem.BondType.SINGLE
-                    # bond_type = Chem.rdchem.BondType.AROMATIC
-                    # bond_type = Chem.rdchem.BondType.ONEANDAHALF
-                rdmol_G.add_edge(
-                    bond.GetBeginAtomIdx(),
-                    bond.GetEndAtomIdx(),
-                    bond_order=_bondtypes[bond_type],
-                )
-            return rdmol_G
 
         def _openmm_topology_to_networkx(openmm_topology):
             """
@@ -1072,7 +1168,7 @@ class NetworkxMonomerEngine(SubstructureEngine):
                 from openmm.app import PDBFile
                 pdb = PDBFile(structure)
 
-                rdmol_G = _rdmol_to_networkx(query)
+                rdmol_G = self._rdmol_to_networkx(query)
                 omm_topology_G = _openmm_topology_to_networkx(pdb.topology)
                 GM = isomorphism.GraphMatcher(
                     omm_topology_G, rdmol_G, node_match=node_match
@@ -1081,8 +1177,8 @@ class NetworkxMonomerEngine(SubstructureEngine):
             else:
                 return -1, -1
         elif isinstance(structure, Chem.rdchem.Mol):
-            rdmol_G = _rdmol_to_networkx(query)
-            structure_G = _rdmol_to_networkx(structure)
+            rdmol_G = self._rdmol_to_networkx(query)
+            structure_G = self._rdmol_to_networkx(structure)
             GM = isomorphism.GraphMatcher(
                 structure_G, rdmol_G, node_match=node_match
             )
@@ -1892,8 +1988,149 @@ class PolymerVisualizer3D:
             clear_output(wait=False)
         display(view)
 
+def find_fitting_lists(lists, adj_matrix):
+    # return the indices of the lists that can be appended together to create a longer list
+    # with no overlapping values in those lists
+
+    all_values = set()
+    for l in lists:
+        for value in l:
+            all_values.add(value)
+    max_val = max(all_values)
+    min_val = min(all_values)
+    matrix_data = []
+    for l in lists:
+        row = []
+        for i in range(0, max_val+1):
+            if i in l:
+                row.append(1)
+            else:
+                row.append(0)
+        matrix_data.append(row)
+    matrix = np.matrix(matrix_data)
+    n_rows, n_cols = matrix.shape
+    # first, find unique rows to start the recursive algorithm
+    unique_row_ids = list(range(0, len(lists)))
+    # we only want one unique_col for each unique_row_ids
+    unique_mapping_groups = []
+    while len(unique_row_ids) != 0:
+        unique_row = unique_row_ids[0]
+        row = np.squeeze(np.asarray(matrix[unique_row, :]))
+        search_scope, = np.where(row==1)
+        list_groups = reduce_matrix(matrix, adj_matrix, search_scope.tolist())
+        print(list_groups)
+        if list_groups: # if list group found
+            # get the largest list group with the fewest number of rows
+            for list_group in list_groups:
+                matrix[list_group, :] = np.zeros((len(list_group), n_cols))
+                group_length = matrix[list_group, :].sum()
+                unique_mapping_groups.append(tuple([group_length, list_group]))
+        else: # returns False if there is a violation
+            continue
+        # remove the found unique mapping from unique_row_ids
+        found_row_ids = []
+        for list_group in list_groups:
+            found_row_ids += list_group
+        found_row_ids = list(set(found_row_ids))
+        new_unique_row_ids = deepcopy(unique_row_ids)
+        for row_id in unique_row_ids:
+            if row_id in found_row_ids:
+                new_unique_row_ids.remove(row_id)
+        unique_row_ids = new_unique_row_ids
+    # finally pick from unique_mapping_groups the largest list
+    largest_group_id = 0
+    largest_group_length = 0
+    last_group_list_size = 0
+    i = 0
+    for group_length, mapping_group in unique_mapping_groups:
+        if group_length >= largest_group_length and len(mapping_group) < last_group_list_size:
+            largest_group_id = i
+            largest_group_length = group_length
+            last_group_list_size = len(mapping_group)
+        i += 1
+    l, largest_group = unique_mapping_groups[largest_group_id]
+    return largest_group
+
+def reduce_matrix(matrix, adj_matrix, search_scope=[]):
+    def get_adjacencies(adj_matrix, col_ids):
+        # returns the column ids of adjacent nodes to the given col_ids
+        all_connections = np.asarray(adj_matrix[col_ids, :].sum(axis=0)).reshape(-1)
+        all_connections[col_ids] = np.zeros(len(col_ids))
+        adjacent_connections, = np.nonzero(all_connections)
+        return adjacent_connections.tolist()
+    # reduces the matrix and returns the rows that were cut plus a smaller matrix for recursion
+
+    n_rows, n_cols = matrix.shape
+
+    if search_scope == []:
+        search_scope = list(range(0, n_cols))
+    new_search_scope = []
+    for idx in search_scope:
+        if idx < n_cols:
+            new_search_scope.append(idx)
+    search_scope = new_search_scope
+            
+    sums = np.asarray(matrix.sum(axis=0)).reshape(-1)
+    # required_unique_cols, = np.where(sums==1)
+    # required_unique_row_ids, = np.nonzero(np.asarray(matrix[:, required_unique_cols].sum(axis=1)).reshape(-1))
+    # required_unique_row_ids = set(required_unique_row_ids.tolist())
+    allowed_sums = sums[search_scope]
+    allowed_sums_ids, = np.where(allowed_sums > 0)
+    allowed_nonzero_sums = allowed_sums[allowed_sums_ids]
+    if allowed_nonzero_sums.size == 0:
+        return [[]]
+    min_allowed_value = min(allowed_nonzero_sums)
+    min_ids, = np.where(allowed_sums==min_allowed_value)
+    last_min_value_id = search_scope[min_ids[0]]
+    
+    # identify columns that have only single elements, and find the unique rows
+    fcolumn = np.squeeze(np.asarray(matrix[:, last_min_value_id]))
+    unique_row_lists = []
+
+    for value, frow_id in zip(fcolumn, range(0, n_rows)):
+        if value == 1:
+            # first, eliminate all rows with overlap to the current row
+            # then call reduce_matrix recursively for each occurance of 1
+            chosen_cols = np.asarray(matrix[frow_id, :].sum(axis=0)).reshape(-1).astype(bool)
+            chosen_col_ids, = np.where(chosen_cols==True)
+            new_search_scope = get_adjacencies(adj_matrix, chosen_col_ids) + search_scope
+            overlap_col_ids = np.array(range(0,len(sums)))[np.logical_and(sums > 1, chosen_cols)]
+            # find rows that have overlapping values (and therefore overlapping substructures)
+            overlap_rows = set()
+            for col_id in overlap_col_ids:
+                column = np.squeeze(np.asarray(matrix[:, col_id]))
+                for row_val, row_id in zip(column, range(0, n_rows)):
+                    # if row_val == 1 and row_id not in unique_rows:
+                    #     overlap_rows.add(row_id)
+                    if row_val == 1:
+                        overlap_rows.add(row_id)
+            # if the overlap_rows (which are discarded) share any rows with the required_unique_row_ids
+            # then, this path of adjacent isomorphisms is invalid 
+            # if len(overlap_rows & (required_unique_row_ids - {frow_id})) > 0:
+            #     return False
+    
+            cut_rows = list(set([frow_id]) | overlap_rows)
+            matrix_copy = deepcopy(matrix)
+            matrix_copy[list(cut_rows), :] = np.zeros((len(cut_rows), n_cols))
+            new_unique_rows = reduce_matrix(matrix_copy, adj_matrix, new_search_scope)
+            if new_unique_rows == False:
+                return False
+            for unique_row in new_unique_rows:
+                unique_row_lists.append([frow_id, *unique_row])
+    return unique_row_lists
 
 if __name__ == "__main__":
+    pdb_file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEG_PLGA_heteropolymer.pdb"
+    monomer_info = {"PEG": ("[C](-[H])(-[H])(-[H])-[O]-[C](-[H])(-[H])-[C](-[H])(-[H])-[O](-[H])", [0,1,2,3,11,12]),
+                    "PLGA1": ("[H]-[O]-[C](=[O])-[C](-[H])(-[C](-[H])(-[H])(-[H]))-[H]",[0,10]),
+                    "PLGA2": ("[H]-[O]-[C](=[O])-[C](-[H])(-[H])-[H]", [0,7])}
+    engine = NetworkxMonomerEngine()
+    engine.get_substructures_from_pdb(monomer_info, pdb_file)
+    engine.output_substructures_json("PEG_PLGA_substructures.json")
+
+    engine = ChemistryEngine(pdb_file)
+    engine.test_polymer_load("PEG_PLGA_substructures.json")
+
     # file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/naturalrubber.pdb"
     # p = ChemistryEngine(file)
     # monomer_ids = [5, 4, 13, 6, 8, 7, 3, 12, 9, 11, 10, 0]
@@ -1926,28 +2163,37 @@ if __name__ == "__main__":
     # engine2.add_monomers_as_sdf(['end1', 'end2', 'middle'], "test_monomers.sdf")
     # engine2.output_substructures_json("sdf_test.json")
 
-    smarts = "[C:1](-[H])(-[H])(-[H])-[O]-[C:2](-[H])(-[H])(-[H])"
-    pdb_file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEO.pdb"
-    substruct_file = "automatic_PEO_substructures.json"
-    charges_file_name = "PEO_charges.txt"
+    # smarts = "[C:1](-[H])(-[H])(-[H])-[O]-[C:2](-[H])(-[H])(-[H])"
 
-    engine = PolymerNetworkRepresentation()
+    # engine = NetworkxMonomerEngine()
+    # rdmol, graph = engine.build_random_polymer_from_connection_dict("PEO", smarts, {1:2}, [1,7], length=4)
 
-    for i in range(0,1000):
-        engine.add_monomer_randomly("PEO", [(1,2), (2,1), (3,4)])
-    for i in range(0,3000):
-        engine.add_monomer_randomly("ahh", [(4,3), (3,4)])
+    # smarts = "[C:1](-[H])(-[H])(-[H])-[O]-[C:2](-[H])(-[H])(-[H])"
+    # pdb_file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEO.pdb"
+    # substruct_file = "automatic_PEO_substructures.json"
+    # charges_file_name = "PEO_charges.txt"
 
-    engine.complete_monomer({1: {9}, 2:{5}, 3:{12}})
-    graph = engine.graph
-    labels_dict = {}
-    for node in graph.nodes:
-        if graph.nodes[node]["terminal_group"] == True:
-            labels_dict[node] = graph.nodes[node]["terminal_group_ids"]
-        else:
-            labels_dict[node] = f"{node}, {graph.nodes[node]['open_bonds']}"
-    nx.draw(graph, pos = nx.kamada_kawai_layout(graph), with_labels=True, labels=labels_dict)
-    plt.savefig("bla.png")
+    # engine = NetworkxMonomerEngine()
+
+    # engine.get_substructures_from_connections("PEO", smarts, {1:2}, [1,7])
+    # print(polymer)
+    # [print(a.GetSymbol()) for a in polymer.GetAtoms()]
+    # [print(b.GetBondType()) for b in polymer.GetBonds()]
+
+    # engine = PolymerNetworkRepresentation()
+    # for i in range(0, 40):
+    #     engine.add_monomer_randomly("PAMAM", bond_info = [(1,2), (2,1), (2,1)])
+    # engine.complete_monomer({1: {2}, 2: {9}})
+    # graph = engine.graph
+
+    # labels_dict = {}
+    # for node in graph.nodes:
+    #     if graph.nodes[node]["terminal_group"] == True:
+    #         labels_dict[node] = graph.nodes[node]["terminal_group_ids"]
+    #     else:
+    #         labels_dict[node] = f"{node}, {graph.nodes[node]['open_bonds']}"
+    # nx.draw(graph, pos = nx.kamada_kawai_layout(graph), with_labels=True, labels=labels_dict)
+    # plt.savefig("bla.png")
 
 # takeaways from 6/9 meeting:
 # need to go from "monomer info" to a fully parameterized pdb file with substructures, and the 
