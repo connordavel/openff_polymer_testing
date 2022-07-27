@@ -19,7 +19,7 @@ import parmed
 def simulate_polymer(pdbfile, substructure_file, offxml_file, output):
     # mol should already have one conformer...
 
-    mol_conf = Molecule.from_pdb(str(path_loc), substructure_file)
+    mol_conf = Molecule.from_pdb(pdbfile, substructure_file)
     pdbfile = PDBFile(pdbfile)
     omm_topology = pdbfile.topology
 
@@ -66,9 +66,9 @@ if __name__ == "__main__":
         print("could not find path given")
         sys.exit()
 
-    offxml_file = 'openff_unconstrained_no_library_charges-2.0.0.offxml'
-    st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_no_library_charges")
-    print(f"time to create openmm system: {diff}")
+    # offxml_file = 'openff_unconstrained_no_library_charges-2.0.0.offxml'
+    # st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_no_library_charges")
+    # print(f"time to create openmm system: {diff}")
 
     offxml_file = 'openff_unconstrained_with_library_charges-2.0.0.offxml'
     st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_with_library_charges")
