@@ -285,7 +285,6 @@ class SubstructureGenerator:
             enumerated_substructures.append(Chem.MolToSmarts(substructure))
         return enumerated_substructures
 
-
     def get_monomer_info_dict(self):
         monomer_dict = {"monomers": defaultdict(str), "caps": defaultdict(list)}
         for name, monomer in self.monomers.items():

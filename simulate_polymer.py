@@ -19,12 +19,14 @@ import parmed
 def simulate_polymer(pdbfile, substructure_file, offxml_file, output):
     # mol should already have one conformer...
 
-    mol_conf = Molecule.from_pdb(pdbfile, substructure_file)
+    mol_conf = Molecule.from_pdb_and_monomer_info(pdbfile, substructure_file)
     pdbfile = PDBFile(pdbfile)
     omm_topology = pdbfile.topology
 
     off_topology = mol_conf.to_topology()
     forcefield = ForceField(offxml_file)
+    forcefield.deregister_parameter_handler('ToolkitAM1BCC')
+    forcefield.get_parameter_handler('ChargeIncrementModel', {"version":0.3, "partial_charge_method":"gasteiger"})
     start = time.time()
     system = forcefield.create_openmm_system(off_topology, allow_nonintegral_charges=True) #WARNING: I have no idea that this means 
     end = time.time()
@@ -43,7 +45,7 @@ def simulate_polymer(pdbfile, substructure_file, offxml_file, output):
     simulation.reporters.append(dcd_reporter)
     
     simulation.minimizeEnergy(maxIterations=1000)
-    simulation.step(1000)
+    simulation.step(10000)
     st = simulation.context.getState(getPositions=True, getEnergy=True)
     print(st.getPotentialEnergy())
     # print(st.getPositions())
@@ -57,8 +59,9 @@ def simulate_polymer(pdbfile, substructure_file, offxml_file, output):
     return st, difference
 
 if __name__ == "__main__":
-    path_str = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEO.pdb"
-    substructure_file = "automatic_PEO_substructures.json"
+    path_str = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEG_PLGA_heteropolymer.pdb"
+    substructure_file = "/home/coda3831/openff-workspace/openff_polymer_testing/PEG_PLGA_monomers.json"
+    
     path_loc = Path(path_str)
     if not path_loc.exists():
         path_loc = Path("openff_polymer_testing/" + path_str)
@@ -66,11 +69,11 @@ if __name__ == "__main__":
         print("could not find path given")
         sys.exit()
 
-    # offxml_file = 'openff_unconstrained_no_library_charges-2.0.0.offxml'
-    # st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_no_library_charges")
-    # print(f"time to create openmm system: {diff}")
-
-    offxml_file = 'openff_unconstrained_with_library_charges-2.0.0.offxml'
-    st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_with_library_charges")
+    offxml_file = 'openff_unconstrained_no_library_charges-2.0.0.offxml'
+    st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_no_library_charges")
     print(f"time to create openmm system: {diff}")
+
+    # offxml_file = 'openff_unconstrained_with_library_charges-2.0.0.offxml'
+    # st, diff = simulate_polymer(str(path_loc), substructure_file, offxml_file, "PEO_traj_with_library_charges")
+    # print(f"time to create openmm system: {diff}")
 
