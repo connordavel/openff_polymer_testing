@@ -4,14 +4,15 @@ from collections import defaultdict
 from copy import deepcopy
 import sys, getopt
 from substructure_generator import *
+from openff.toolkit.topology import Topology
 
 if __name__ == "__main__":
     from openff.toolkit.topology.molecule import Molecule
 
-    pdb_file = "/home/coda3831/openff-workspace/polymer_examples/compatible_pdbs/simple_polymers/vulcanizedrubber.pdb"
-    json_file = "/home/coda3831/openff-workspace/openff_polymer_testing/vulcanizedrubber.json"
-    mol, bla = Molecule().from_pdb_and_monomer_info(pdb_file, json_file)
-    print(bla)
+    pdb_file = "/home/coda3831/openff-workspace/polymer_examples/compatible_pdbs/simple_polymers/naturalrubber.pdb"
+    json_file = "/home/coda3831/openff-workspace/openff_polymer_testing/naturalrubber.json"
+    mol = Topology.from_pdb_and_monomer_info(pdb_file, json_file)
+    print(mol)
 
     # python substructure_generator.py -f PEG_PLGA_monomer_input.sdf -n bla -o substructures_new.json
 
