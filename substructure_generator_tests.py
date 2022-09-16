@@ -9,23 +9,23 @@ from openff.toolkit.topology import Topology
 if __name__ == "__main__":
     from openff.toolkit.topology.molecule import Molecule
 
-    pdb_file = "/home/coda3831/openff-workspace/polymer_examples/compatible_pdbs/simple_polymers/naturalrubber.pdb"
-    json_file = "/home/coda3831/openff-workspace/openff_polymer_testing/naturalrubber.json"
-    mol = Topology.from_pdb_and_monomer_info(pdb_file, json_file)
-    print(mol)
+    # pdb_file = "/home/coda3831/openff-workspace/polymer_examples/compatible_pdbs/simple_polymers/naturalrubber.pdb"
+    # json_file = "/home/coda3831/openff-workspace/openff_polymer_testing/naturalrubber.json"
+    # mol = Topology.from_pdb_and_monomer_info(pdb_file, json_file)
+    # print(mol)
 
     # python substructure_generator.py -f PEG_PLGA_monomer_input.sdf -n bla -o substructures_new.json
 
     # pdb_file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEG_PLGA_heteropolymer.pdb"
-    # json_file = "PEG_PLGA_substructures.json"
-    # monomer_info = {"PEG": ("[C](-[H])(-[H])(-[H])-[O:1]-[C:2](-[H:3])(-[H:4])-[C:5](-[H:6])(-[H:7])-[O](-[H])", [0,1,2,3,11,12]),
-    #                 "PLGA1": ("[H]-[O:1]-[C:2](=[O:3])-[C:4](-[H:5])(-[C:6](-[H:7])(-[H:8])(-[H:9]))-[H]",[0,10]),
-    #                 "PLGA2": ("[H]-[O:1]-[C:2](=[O:3])-[C:4](-[H:5])(-[H:6])-[H]", [0,7])}
-    # engine = MonomerEngine()
-    # for name, substructure_and_caps in monomer_info.items():
-    #     smarts, caps = substructure_and_caps
-    #     engine.add_monomer_as_smarts_fragment(smarts, name, caps)
-    # engine.output_monomer_info_json(json_file)
+    json_file = "PEG_PLGA_substructures.json"
+    monomer_info = {"PEG": ("[C](-[H])(-[H])(-[H])-[O:1]-[C:2](-[H:3])(-[H:4])-[C:5](-[H:6])(-[H:7])-[O](-[H])", [0,1,2,3,11,12]),
+                    "PLGA1": ("[H]-[O:1]-[C:2](=[O:3])-[C:4](-[H:5])(-[C:6](-[H:7])(-[H:8])(-[H:9]))-[H]",[0,10]),
+                    "PLGA2": ("[H]-[O:1]-[C:2](=[O:3])-[C:4](-[H:5])(-[H:6])-[H]", [0,7])}
+    engine = SubstructureGenerator()
+    for name, substructure_and_caps in monomer_info.items():
+        smarts, caps = substructure_and_caps
+        engine.add_monomer_as_smarts_fragment(smarts, name, caps)
+    engine.output_monomer_info_json(json_file)
 
     # mol = Molecule().from_pdb_and_monomer_info(pdb_file, json_file)
 
