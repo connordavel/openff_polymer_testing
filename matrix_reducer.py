@@ -229,83 +229,224 @@ from rdkit import Chem
 #                 break
 #     return reduce_matrix(queue, adjacency_list, found_isomorphisms, found_edges)
 
+# def find_fitting_lists(isomorphism_info):
+#     # return the indices of the lists that can be appended together to create a longer list
+#     # with no overlapping values in those lists
+#     def _reduce_matrix(queue, adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms = []):
+#         # searches for isomorphisms that fit together based on isomorphism adjacency info: 
+
+#         if queue == []:
+#             return found_isomorphisms
+#         v = queue.pop(0)
+#         found_isomorphisms.append(v)
+#         # search v for adjacent isomorphisms
+#         adjacency_info = adjacency_list[v]
+#         for edge_atom, cap_atom, bond_type in adjacency_info:
+#             neighbor_bond = (cap_atom, edge_atom, bond_type) # adjacent isomorphism will contain a bond with reversed indices
+#             # attempt to find the first instance of the cap_atom in neighboring isomorphisms
+#             found_iso_id = -1
+#             for neighbor_bond_info, id in zip(adjacency_list, range(0, len(adjacency_list))):
+#                 if neighbor_bond in neighbor_bond_info and id not in found_isomorphisms and {edge_atom, cap_atom} not in found_edges:
+#                     found_iso_id = id
+#                     if id in favor_isomorphisms:
+#                         break
+#             if found_iso_id > 0:
+#                 queue.append(found_iso_id)
+#                 found_edges.append(set([edge_atom, cap_atom]))
+#         return _reduce_matrix(queue, adjacency_list, found_isomorphisms, found_edges)
+
+#     all_values = set()
+#     for isomorphism in isomorphism_info:
+#         iso_ids, adjacencies = isomorphism
+#         for value in iso_ids:
+#             all_values.add(value)
+#     max_val = max(all_values)
+#     min_val = min(all_values)
+#     # create a matrix to find atom overlaps
+#     matrix_data = []
+#     adjacency_list = []
+#     for isomorphism in isomorphism_info:
+#         iso_ids, adjacencies = isomorphism
+#         row = []
+#         for i in range(0, max_val+1):
+#             if i in iso_ids:
+#                 row.append(1)
+#             else:
+#                 row.append(0)
+#         matrix_data.append(row)
+#         adjacencies_tupled = [] # adjacencies in tuple form for easier searching
+#         for bond, bond_type in adjacencies.items():
+#             edge_atom, cap_atom = bond
+#             adjacencies_tupled.append(tuple([edge_atom, cap_atom, bond_type]))
+#         adjacency_list.append(adjacencies_tupled)
+
+#     # matrix_data and adjacency_list are parallel to eachother
+#     # each item in adjacency_list corresponds to the isomorphism found in the 
+#     # corresponding row of matrix_data
+#     matrix = np.matrix(matrix_data)
+#     full_matrix = deepcopy(matrix)
+#     n_rows, n_cols = matrix.shape
+#     # first, find unique rows to start the recursive algorithm
+#     # we only want one unique_col for each unique_row_ids
+#     largest_mapping_group = []
+#     largest_group_length = 0
+#     for unique_row in range(0, n_rows):
+#         if unique_row in largest_mapping_group:
+#             continue
+#         row = np.squeeze(np.asarray(matrix[unique_row, :]))
+#         search_scope, = np.where(row==1)
+#         list_groups = _reduce_matrix([unique_row], adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms=largest_mapping_group)
+#         if list_groups: # if list group found
+#             # get the largest list group with the fewest number of rows
+#             group_length = full_matrix[list_groups, :].sum()
+#             matrix[list_groups, :] = np.zeros((len(list_groups), n_cols))
+#             if (group_length > largest_group_length) or (group_length == largest_group_length and len(list_groups) < len(largest_mapping_group)):
+#                 largest_group_length = group_length
+#                 largest_mapping_group = list_groups
+#         else:
+#             continue
+#     # finally pick from unique_mapping_groups the largest list
+#     return largest_mapping_group
+
 def find_fitting_lists(isomorphism_info):
     # return the indices of the lists that can be appended together to create a longer list
     # with no overlapping values in those lists
-    def _reduce_matrix(queue, adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms = []):
+    def _create_choice_graph(isomorphism_info):
+        all_values = set()
+        for isomorphism in isomorphism_info:
+            iso_ids, adjacencies = isomorphism
+            for value in iso_ids:
+                all_values.add(value)
+        max_val = max(all_values)
+        min_val = min(all_values)
+        # create a matrix to find atom overlaps
+        matrix_data = []
+        adjacency_list = []
+        for isomorphism in isomorphism_info:
+            iso_ids, adjacencies = isomorphism
+            cap_ids = []
+            adjacencies_tupled = [] # adjacencies in tuple form for easier searching
+            for bond, bond_type in adjacencies.items():
+                edge_atom, cap_atom = bond
+                cap_ids.append(cap_atom)
+                adjacencies_tupled.append(tuple([edge_atom, cap_atom, bond_type]))
+            adjacency_list.append(adjacencies_tupled)
+
+            row = []
+            for i in range(0, max_val+1):
+                if i in iso_ids and i not in cap_ids:
+                    row.append(1)
+                else:
+                    row.append(0)
+            matrix_data.append(row)
+            
+
+        # matrix_data and adjacency_list are parallel to eachother
+        # each item in adjacency_list corresponds to the isomorphism found in the 
+        # corresponding row of matrix_data
+        matrix = np.matrix(matrix_data)
+        n_rows, n_cols = matrix.shape
+        G = nx.Graph()
+        for iso_id, isomorphism in enumerate(adjacency_list):
+            n_atoms = len(isomorphism_info[iso_id][0])
+            cap_atoms = []
+            neighbors = []
+            for bond in isomorphism:
+                edge_a, cap_a, bond_type = bond
+                cap_atoms.append(cap_a)
+                neighbor_bond = (cap_a, edge_a, bond_type)
+                for neighbor_id, neighbor_isomorphism in enumerate(adjacency_list):
+                    for bond in neighbor_isomorphism:
+                        if neighbor_bond == bond:
+                            neighbors.append(tuple([neighbor_id, bond_type, edge_a]))
+
+            row, = np.nonzero(np.squeeze(np.asarray(matrix[iso_id, :])))
+            row = list(row)
+            # find overlaps using matrix 
+            overlaps, = np.nonzero(np.asarray(matrix[:, row].sum(axis=1)).reshape(-1))
+            overlaps = list(overlaps)
+            overlaps.remove(iso_id)
+            G.add_node(
+                iso_id,
+                selected = False,
+                overlaps = overlaps,
+                bonds = isomorphism,
+                n_atoms = n_atoms
+            )
+            for n_id, bond_type, edge_a in neighbors:
+                G.add_edge(
+                    iso_id,
+                    n_id,
+                    order = bond_type
+                )
+        return G
+
+    def _traverse(queue, graph, found_nodes, found_edges):
         # searches for isomorphisms that fit together based on isomorphism adjacency info: 
-
         if queue == []:
-            return found_isomorphisms
+            return found_nodes
         v = queue.pop(0)
-        found_isomorphisms.append(v)
-        # search v for adjacent isomorphisms
-        adjacency_info = adjacency_list[v]
-        for edge_atom, cap_atom, bond_type in adjacency_info:
-            neighbor_bond = (cap_atom, edge_atom, bond_type) # adjacent isomorphism will contain a bond with reversed indices
-            # attempt to find the first instance of the cap_atom in neighboring isomorphisms
-            found_iso_id = -1
-            for neighbor_bond_info, id in zip(adjacency_list, range(0, len(adjacency_list))):
-                if neighbor_bond in neighbor_bond_info and id not in found_isomorphisms and {edge_atom, cap_atom} not in found_edges:
-                    found_iso_id = id
-                    if id in favor_isomorphisms:
-                        break
-            if found_iso_id > 0:
-                queue.append(found_iso_id)
-                found_edges.append(set([edge_atom, cap_atom]))
-        return _reduce_matrix(queue, adjacency_list, found_isomorphisms, found_edges)
+        found_nodes.append(v)
+        for bond in graph.nodes[v]['bonds']:
+            edge_a, cap_a, bond_type = bond
+            if {edge_a, cap_a} in found_edges:
+                continue
+            selected_neighbor = -1
+            for neighbor in graph.neighbors(v):
+                # make sure this is the neighbor with the correct bond info
+                neighbor_node = graph.nodes[neighbor]
+                if (cap_a, edge_a, bond_type) not in neighbor_node['bonds']:
+                    continue
+                if neighbor_node['selected'] == True:
+                    selected_neighbor = -1
+                    break
+                selected_neighbor = neighbor
+            if selected_neighbor >= 0:
+                queue.append(selected_neighbor)
+                found_edges.append({edge_a, cap_a})
+    
+        return _traverse(queue, graph, found_nodes, found_edges)
 
-    all_values = set()
-    for isomorphism in isomorphism_info:
-        iso_ids, adjacencies = isomorphism
-        for value in iso_ids:
-            all_values.add(value)
-    max_val = max(all_values)
-    min_val = min(all_values)
-    # create a matrix to find atom overlaps
-    matrix_data = []
-    adjacency_list = []
-    for isomorphism in isomorphism_info:
-        iso_ids, adjacencies = isomorphism
-        row = []
-        for i in range(0, max_val+1):
-            if i in iso_ids:
-                row.append(1)
-            else:
-                row.append(0)
-        matrix_data.append(row)
-        adjacencies_tupled = [] # adjacencies in tuple form for easier searching
-        for bond, bond_type in adjacencies.items():
-            edge_atom, cap_atom = bond
-            adjacencies_tupled.append(tuple([edge_atom, cap_atom, bond_type]))
-        adjacency_list.append(adjacencies_tupled)
 
-    # matrix_data and adjacency_list are parallel to eachother
-    # each item in adjacency_list corresponds to the isomorphism found in the 
-    # corresponding row of matrix_data
-    matrix = np.matrix(matrix_data)
-    full_matrix = deepcopy(matrix)
-    n_rows, n_cols = matrix.shape
     # first, find unique rows to start the recursive algorithm
     # we only want one unique_col for each unique_row_ids
+    choice_G = _create_choice_graph(isomorphism_info)
+    connected_component_counts = []
+    biggest_chain = None
+    biggest_chain_length = 0
+    for chain in nx.connected_components(choice_G):
+        subgraph = choice_G.subgraph(chain)
+        not_searched_nodes = list(subgraph.nodes)
+        while len(not_searched_nodes) != 0:
+            unique_group = _traverse([not_searched_nodes[0]], subgraph, [], [])
+            new_tally = 0
+            old_tally = 0
+            overlapping_nodes = []
+            for node in unique_group:
+                new_tally += subgraph.nodes[node]['n_atoms']
+                for overlapping_node in subgraph.nodes[node]['overlaps']:
+                    if overlapping_node in subgraph.nodes and subgraph.nodes[overlapping_node]['selected'] == True:
+                        overlapping_nodes.append(overlapping_node)
+                        old_tally += subgraph.nodes[overlapping_node]['n_atoms']
+            if new_tally > old_tally:
+                # exchange new for old choices 
+                for node in unique_group:
+                    subgraph.nodes[node]['selected'] = True
+                for node in overlapping_nodes:
+                    subgraph.nodes[node]['selected'] = False
+            [not_searched_nodes.remove(i) for i in unique_group]
+        tally = 0
+        for node in subgraph.nodes:
+            if subgraph.nodes[node]['selected']:
+                tally += subgraph.nodes[node]['n_atoms']
+        if tally > biggest_chain_length:
+            biggest_chain = subgraph
+            biggest_chain_length = tally
+        # finally pick from unique_mapping_groups the largest list
     largest_mapping_group = []
-    largest_group_length = 0
-    for unique_row in range(0, n_rows):
-        if unique_row in largest_mapping_group:
-            continue
-        row = np.squeeze(np.asarray(matrix[unique_row, :]))
-        search_scope, = np.where(row==1)
-        list_groups = _reduce_matrix([unique_row], adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms=largest_mapping_group)
-        if list_groups: # if list group found
-            # get the largest list group with the fewest number of rows
-            group_length = full_matrix[list_groups, :].sum()
-            matrix[list_groups, :] = np.zeros((len(list_groups), n_cols))
-            if (group_length > largest_group_length) or (group_length == largest_group_length and len(list_groups) < len(largest_mapping_group)):
-                largest_group_length = group_length
-                largest_mapping_group = list_groups
-        else:
-            continue
-    # finally pick from unique_mapping_groups the largest list
+    for node in biggest_chain.nodes:
+        if biggest_chain.nodes[node]['selected']:
+            largest_mapping_group.append(node)
     return largest_mapping_group
 
 
