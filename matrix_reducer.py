@@ -308,6 +308,105 @@ from rdkit import Chem
 #     # finally pick from unique_mapping_groups the largest list
 #     return largest_mapping_group
 
+        # def _find_fitting_lists(isomorphism_info):
+        #     # return the indices of the lists that can be appended together to create a longer list
+        #     # with no overlapping values in those lists
+        #     def _reduce_matrix(queue, matrix, adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms = []):
+        #         # searches for isomorphisms that fit together based on isomorphism adjacency info: 
+        #         if queue == []:
+        #             return found_isomorphisms
+        #         v = queue.pop(0)
+        #         found_isomorphisms.append(v)
+        #         # search v for adjacent isomorphisms
+        #         adjacency_info = adjacency_list[v]
+        #         for edge_atom, cap_atom, bond_type in adjacency_info:
+        #             neighbor_bond = (cap_atom, edge_atom, bond_type) # adjacent isomorphism will contain a bond with reversed indices
+        #             # attempt to find the first instance of the cap_atom in neighboring isomorphisms
+        #             found_iso_id = -1
+        #             biggest_neighbor_size = 0
+        #             for neighbor_bond_info, id in zip(adjacency_list, range(0, len(adjacency_list))):
+        #                 if neighbor_bond in neighbor_bond_info and id not in (found_isomorphisms + queue) and {edge_atom, cap_atom} not in found_edges:
+        #                     # if neighbor_bond in [(32, 31, bond_type), (34,35, bond_type), (39,40, bond_type), (39,44, bond_type)]:
+        #                     #     test = 1
+        #                     if np.any(np.squeeze(np.asarray(matrix[found_isomorphisms + [id], :].sum(axis=0))) > 1): # if there is an overlap with previous isomorphisms
+        #                         continue
+        #                     # this does solve the problem of overlapping isomorphisms, but sometimes you
+        #                     # actually want isomorphisms to replace previous isomorphisms that didn't work so well 
+        #                     # if id in favor_isomorphisms:
+        #                     #     found_iso_id = id
+        #                     #     break
+        #                     if matrix[id, :].sum() > biggest_neighbor_size:
+        #                         found_iso_id = id
+        #                         biggest_neighbor_size = matrix[id, :].sum()
+                            
+        #                     #     ####
+        #                     #     found_isomorphisms += favor_isomorphisms
+        #                     #     found_iso_id = -1
+        #                     #     break
+        #                     #     #####
+        #                     # else:
+        #                     #     found_iso_id = id
+        #                     # break
+                            
+        #             if found_iso_id > 0:
+        #                 queue.append(found_iso_id)
+        #                 found_edges.append(set([edge_atom, cap_atom]))
+        #         return _reduce_matrix(queue, matrix, adjacency_list, found_isomorphisms, found_edges)
+
+        #     all_values = set()
+        #     for isomorphism in isomorphism_info:
+        #         iso_ids, adjacencies = isomorphism
+        #         for value in iso_ids:
+        #             all_values.add(value)
+        #     max_val = max(all_values)
+        #     min_val = min(all_values)
+        #     # create a matrix to find atom overlaps
+        #     matrix_data = []
+        #     adjacency_list = []
+        #     for isomorphism in isomorphism_info:
+        #         iso_ids, adjacencies = isomorphism
+        #         row = []
+        #         for i in range(0, max_val+1):
+        #             if i in iso_ids:
+        #                 row.append(1)
+        #             else:
+        #                 row.append(0)
+        #         matrix_data.append(row)
+        #         adjacencies_tupled = [] # adjacencies in tuple form for easier searching
+        #         for bond, bond_type in adjacencies.items():
+        #             edge_atom, cap_atom = bond
+        #             adjacencies_tupled.append(tuple([edge_atom, cap_atom, bond_type]))
+        #         adjacency_list.append(adjacencies_tupled)
+
+        #     # matrix_data and adjacency_list are parallel to eachother
+        #     # each item in adjacency_list corresponds to the isomorphism found in the 
+        #     # corresponding row of matrix_data
+        #     matrix = np.matrix(matrix_data)
+        #     full_matrix = deepcopy(matrix)
+        #     n_rows, n_cols = matrix.shape
+        #     # first, find unique rows to start the recursive algorithm
+        #     # we only want one unique_col for each unique_row_ids
+        #     largest_mapping_group = []
+        #     largest_group_length = 0
+        #     for unique_row in range(0, n_rows):
+        #         if unique_row in largest_mapping_group:
+        #             continue
+        #         row = np.squeeze(np.asarray(matrix[unique_row, :]))
+        #         search_scope, = np.where(row==1)
+        #         list_groups = _reduce_matrix([unique_row], full_matrix, adjacency_list, found_isomorphisms = [], found_edges = [], favor_isomorphisms=largest_mapping_group)
+        #         if list_groups: # if list group found
+                    
+        #             # get the largest list group with the fewest number of rows
+        #             group_length = full_matrix[list_groups, :].sum()
+        #             matrix[list_groups, :] = np.zeros((len(list_groups), n_cols))
+        #             if (group_length > largest_group_length) or (group_length == largest_group_length and len(list_groups) < len(largest_mapping_group)):
+        #                 largest_group_length = group_length
+        #                 largest_mapping_group = list_groups
+        #         else:
+        #             continue
+        #     # finally pick from unique_mapping_groups the largest list
+        #     return largest_mapping_group
+
 def find_fitting_lists(isomorphism_info):
     # return the indices of the lists that can be appended together to create a longer list
     # with no overlapping values in those lists
