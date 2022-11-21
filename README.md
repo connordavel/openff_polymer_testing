@@ -50,5 +50,3 @@
 ---
 ![26](slides/slide_Page_26.png)
 ---
-![27](slides/slide_Page_27.png)
----
