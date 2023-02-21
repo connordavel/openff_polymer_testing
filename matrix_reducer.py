@@ -578,4 +578,4 @@ if __name__ == "__main__":
     # adj_matrix = nx.to_numpy_matrix(graph).astype(int)
 
     lists = find_fitting_lists(lists)
-    print(lists)
+    print(sorted(lists))
