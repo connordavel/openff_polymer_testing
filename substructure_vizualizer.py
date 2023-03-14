@@ -161,7 +161,7 @@ class ChemistryEngine:
         monomer_smarts, _, _ = self.get_smarts_from_ids(ids, additional_specs)
         self.substructure_generator.add_monomer(name, monomer_smarts)
 
-    def test_polymer_load(self, substructure_lib, verbose=True):
+    def test_polymer_load(self, substructnuure_lib, verbose=True):
         # executes from_pdb using the given biopolymer substructure library and records how many
         # atoms and bonds have chemical information assigned.
         # returns: original molecule ids that are assigned and have assigned bonds 

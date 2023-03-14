@@ -13,33 +13,30 @@ class SubstructureGenerator:
     #                      READERS
     #WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
 
-    def add_monomer_as_smarts_fragment(self, smarts, name, caps=[], add_caps_from_discarded_ids=True):
+    def add_monomer_as_smarts_fragment(self, smarts, name, cap_ids=[], replace_map_nums=True, add_caps_from_discarded_ids=True):
         rdmol = Chem.rdmolfiles.MolFromSmarts(smarts)
-        if caps == []: # attempt to find caps from MapNums if not specified
+        # add map numbers to any atoms 
+        if replace_map_nums:
             for atom in rdmol.GetAtoms():
-                if atom.GetAtomMapNum() == 0:
-                    caps.append(atom.GetIdx())
-        if caps == []:
+                atom.SetAtomMapNum(atom.GetIdx() + 1)
+        else:
+            self.check_map_nums()
+
+        if cap_ids == []:
             return -1
-        print(caps)
-        # remove caps and store monomer + caps in Monomer instance
-        atoms_to_use = [] # opposte of caps list
-        atom_map_index = 1
+        
+        body = [] # opposte of caps list
         for atom in rdmol.GetAtoms():
             idx = atom.GetIdx()
-            if idx not in caps:
-                atoms_to_use.append(idx)
-                atom.SetAtomMapNum(atom_map_index)
-                atom_map_index += 1
-            else: 
-                atom.SetAtomMapNum(0)
+            if idx not in cap_ids:
+                body.append(idx)
 
         # caps are found by finding all connected fragments with ids in "caps"
         cap_fragments = []
         if add_caps_from_discarded_ids:
             for atom in rdmol.GetAtoms():
                 id = atom.GetIdx()
-                if id not in caps:
+                if id not in cap_ids:
                     continue
                 # if neighbor in existing fragment, add id to that fragment
                 connected_fragments = []
@@ -61,17 +58,18 @@ class SubstructureGenerator:
         # find where each monomer connects to the cap, and replace with wildtype atoms 
         # but with the same bond order 
         mid_rdmol = deepcopy(rdmol)
+        body_with_connections = deepcopy(body)
         for atom in mid_rdmol.GetAtoms():
-            if atom.GetIdx() in caps:
+            if atom.GetIdx() in cap_ids:
                 continue
             # search atom neighbors for connections to capped atoms
             for neighbor in atom.GetNeighbors():
-                if neighbor.GetIdx() in caps:
+                if neighbor.GetIdx() in cap_ids:
                     neighbor.SetAtomicNum(0)
                     neighbor.SetQuery(Chem.AtomFromSmarts("[*]")) # must reset query for wildtype atom to be printed
-                    atoms_to_use.append(neighbor.GetIdx())
-                
-        monomer_smarts = Chem.MolFragmentToSmarts(mid_rdmol, atomsToUse = atoms_to_use)
+                    body_with_connections.append(neighbor.GetIdx())
+
+        monomer_smarts = Chem.MolFragmentToSmarts(mid_rdmol, atomsToUse=body_with_connections)
         self.add_monomer(name, monomer_smarts)
         # finally, for each connected cap, find where the cap connects to the monomer
         for cap_fragment in cap_fragments:
@@ -82,8 +80,7 @@ class SubstructureGenerator:
                     continue
                 # search atom neighbors for connections to monomer_atom
                 for neighbor in atom.GetNeighbors():
-                    if neighbor.GetAtomMapNum() > 0: # if part of main body of monomer
-                        neighbor.SetAtomicNum(0)
+                    if neighbor.GetIdx() in body: # if part of main body of monomer
                         neighbor.SetQuery(Chem.AtomFromSmarts("[*]")) # must reset query for wildtype atom to be printed
                         # neighbor should retain its original atomMapNum
                         cap_ids_to_use.append(neighbor.GetIdx())
@@ -178,7 +175,7 @@ class SubstructureGenerator:
     #                        WRITERS
     #WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
 
-    def _enumerate_substructures_with_caps(self, monomer_smarts, monomer_caps, remove_complete_substructures=True):
+    def _enumerate_substructures_with_caps(self, name, remove_complete_substructures=True):
         # for a named substructure, returns all possible combinations
         # of caps and inter-monomer bonds. 
         # monomer_smarts: smarts of the monomer, with wildtype atoms (required) repressenting 
@@ -186,42 +183,55 @@ class SubstructureGenerator:
         # monomer_caps: list of smarts with atom_mapped wildtype atoms representing a connection
         #               to a atom. The AtomMapNum of the wildtype atom must match the AtomMapNum
         #               of the atom represented by the wildtype atom
-        if monomer_caps == []:
-            return [monomer_smarts]
+        monomer = self.monomers[name]
+        if monomer.caps == []:
+            return {name: monomer.smarts}
 
-        rdmol = Chem.MolFromSmarts(monomer_smarts)
-        cap_groups = defaultdict(list)
+        rdmol = Chem.MolFromSmarts(monomer.smarts)
+        cap_groups = []
         # the default "cap" is the intermonomer bond represented with wildtype atoms
         for atom in rdmol.GetAtoms():
-            if atom.GetAtomicNum() == 0: # found a wildtype atom
+            if atom.GetAtomicNum() == 0:
                 atom_id = atom.GetIdx()
                 rdmol_copy = deepcopy(rdmol)
                 atom_copy = rdmol_copy.GetAtomWithIdx(atom_id)
+                # atom_copy.SetAtomMapNum(0)
                 # should only have one neighbor
-                neighbor = atom_copy.GetNeighbors()[0] #should only have one neighbor
-                atom_map_num = neighbor.GetAtomMapNum()
-                if atom_map_num == 0: # if connected to intermonomer bond, else, error
-                    print("ill-formated monomer: inter-monomer connection without atom map number")
-                    return []
-                      
-                neighbor.SetAtomicNum(0)
-                neighbor.SetQuery(Chem.AtomFromSmarts("[*]"))
-                neighbor.SetAtomMapNum(atom_map_num)
-                ids_to_include = [atom.GetIdx(), neighbor.GetIdx()]
+                next_monomer_connection = None
+                for neighbor in atom_copy.GetNeighbors():
+                    if neighbor.GetAtomMapNum() > 0: # if connected to intermonomer bond
+                        next_monomer_connection = neighbor
+                next_monomer_connection.SetAtomicNum(0)
+                atom_map_num = next_monomer_connection.GetAtomMapNum()
+                next_monomer_connection.SetQuery(Chem.AtomFromSmarts("[*]"))
+                next_monomer_connection.SetAtomMapNum(atom_map_num)
+                ids_to_include = [atom.GetIdx(), next_monomer_connection.GetIdx()]
                 cap_smarts = Chem.MolFragmentToSmarts(rdmol_copy, atomsToUse = ids_to_include)
-                cap_groups[atom_map_num].append(cap_smarts)
+                cap_groups.append(tuple([atom_map_num, [cap_smarts]]))
         # also add end-of-polymer caps that are specified
-        for cap_smarts in monomer_caps:
+        for cap_smarts in monomer.caps:
             cap_rdmol = Chem.MolFromSmarts(cap_smarts)
             # find with atom on the monomer the cap bonds to
             for atom in cap_rdmol.GetAtoms():
                 if atom.GetAtomicNum() == 0:
-                    cap_groups[atom.GetAtomMapNum()].append(cap_smarts)
+                    for map_num, cap_smarts_list in cap_groups:
+                        if atom.GetAtomMapNum() == map_num:
+                            cap_smarts_list.append(cap_smarts)
                     break
         # enumerate all combinations of the cap_groups
-        cap_groups = list(cap_groups.values())
-        enumerated_substructures = []
+        # cap_groups = [set(l) for map_num, l in cap_groups]
+        # deduplified_groups = []
+        # [deduplified_groups.append(i) for i in cap_groups if i not in deduplified_groups]
+        # deduplified_groups = [list(i) for i in deduplified_groups]
+        cap_groups = [[(map_num, string) for string in l] for map_num, l in cap_groups]
+        name_id = 0
+        enumerated_substructures = dict()
         for iters in itertools.product(*cap_groups): # enumerate all combinations of cap_groups
+            name_id += 1
+            if name_id != 1:
+                cap_group_name = name + "_TERM" + str(name_id)
+            else:
+                cap_group_name = name
             # first, remove all wildtype atoms
             nonwildtype_atoms = []
             for atom in rdmol.GetAtoms():
@@ -230,42 +240,33 @@ class SubstructureGenerator:
             substructure_smarts = Chem.MolFragmentToSmarts(rdmol, atomsToUse = nonwildtype_atoms)
             substructure = Chem.MolFromSmarts(substructure_smarts)
             # attach caps to the substructure (except for intermonomder bonds, which are already present)
-            for cap_smarts in iters:
+            for attachment_atom_map_num, cap_smarts in iters:
                 #TODO: better way of doing this
                 # attach the cap smarts to the substructure
                 cap_rdmol = Chem.MolFromSmarts(cap_smarts)
                 # remove attachment point
-                attachment_atom_map_num = -1
-                cap_start_id = -1
+                cap_start_atom_map_num = -1
                 cap_ids_to_include = []
                 inter_monomer_bond_order = None
                 for atom in cap_rdmol.GetAtoms():
-                    if atom.GetAtomicNum() == 0 and atom.GetAtomMapNum() > 0:
-                        attachment_atom_map_num = atom.GetAtomMapNum()
+                    if atom.GetAtomMapNum() == attachment_atom_map_num:
                         # should have only one neighbor
                         neighbor = atom.GetNeighbors()[0]
-                        cap_start_id = neighbor.GetIdx()
+                        cap_start_atom_map_num = neighbor.GetAtomMapNum()
                         bond = cap_rdmol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
                         inter_monomer_bond_order = bond.GetBondType()
                     else:
                         cap_ids_to_include.append(atom.GetIdx())
-                # use atom MapNums to identify attachment points
-                for atom in cap_rdmol.GetAtoms():
-                    if atom.GetIdx() == cap_start_id:
-                        atom.SetAtomMapNum(1)
-                    else:
-                        atom.SetAtomMapNum(0)
+
                 cap_fragment = Chem.MolFragmentToSmarts(cap_rdmol, atomsToUse=cap_ids_to_include)
                 cap_rdmol = Chem.MolFromSmarts(cap_fragment)
-                for atom in cap_rdmol.GetAtoms():
-                    atom.SetAtomMapNum(-atom.GetAtomMapNum())
                 # find where to attach the cap_fragment using atom map num
                 new_substructure = Chem.CombineMols(substructure, cap_rdmol)
                 # find start and end ids for the bond
                 start = -1
                 end = -1
                 for atom in new_substructure.GetAtoms():
-                    if atom.GetAtomMapNum() < 0:
+                    if atom.GetAtomMapNum() == cap_start_atom_map_num:
                         start = atom.GetIdx()
                     elif atom.GetAtomMapNum() == attachment_atom_map_num:
                         end = atom.GetIdx()
@@ -279,36 +280,57 @@ class SubstructureGenerator:
                         incomplete_substructure = True
                 if not incomplete_substructure:
                     continue
-            # AtomMapNums no longer serve any purpose:
-            for atom in substructure.GetAtoms():
-                atom.SetAtomMapNum(0)
-            enumerated_substructures.append(Chem.MolToSmarts(substructure))
+            enumerated_substructures[cap_group_name] = Chem.MolToSmarts(substructure)
         return enumerated_substructures
 
-    def get_monomer_info_dict(self):
-        monomer_dict = {"monomers": defaultdict(str), "caps": defaultdict(list)}
+    def get_monomer_info_dict(self, expand=True):
+        if expand == True:
+            monomer_dict = {"monomers": defaultdict(str)}
+        else:
+            monomer_dict = {"monomers": defaultdict(str), "caps": defaultdict(list)}
+
         for name, monomer in self.monomers.items():
-            monomer_dict["monomers"][name] = monomer.smarts
-            monomer_dict["caps"][name] = monomer.caps
+            if expand == True:
+                enumerated_monomers = self._enumerate_substructures_with_caps(name)
+                for name, capped_monomer in enumerated_monomers.items():
+                    monomer_dict["monomers"][name] = capped_monomer
+            else:
+                monomer_dict["monomers"][name] = monomer.smarts
+                monomer_dict["caps"][name] = monomer.caps
 
         return monomer_dict 
 
-    def output_monomer_info_json(self, file_name):
+    def output_monomer_info_json(self, file_name, expand=True):
         monomer_dict = self.get_monomer_info_dict()
         with open(file_name, "w") as file:
             json.dump(monomer_dict, file, indent=4)
 
+    #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
+    #                     FORMATING
+    #WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
+    def format_smarts_query(smarts):
+        return smarts
 
+    def validate_smarts_query(smarts):
+        return False
     #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
     #                   ERROR HANDLING
     #WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
-    def check_monomer(rdmol):
+    def check_map_nums(self, rdmol):
         # rdmol: Smarts or Chem.Mol object
         if isinstance(rdmol, str):
             rdmol = Chem.MolToSmarts(rdmol)
 
+        existing_map_nums = []
+        for atom in rdmol.GetAtoms():
+            map_num = atom.GetAtomMapNum()
+            if map_num == 0:
+                Exception(f"All atoms must have map numbers when replace_map_nums=False (ex: [{atom.GetAtomMapNum()}:1])")
+            elif map_num in existing_map_nums:
+                Exception("Atom map numbers must be unique")
+            existing_map_nums.append(map_num)
         return
-    def check_cap(rdmol):
+    def check_cap(self, rdmol):
         if isinstance(rdmol, str):
             rdmol = Chem.MolToSmarts(rdmol)
         return

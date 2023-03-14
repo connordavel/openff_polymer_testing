@@ -4,30 +4,22 @@ from collections import defaultdict
 from copy import deepcopy
 import sys, getopt
 from substructure_generator import *
-from openff.toolkit.topology import Topology
+from openff.toolkit.topology import Topology, Molecule
 
 if __name__ == "__main__":
-    from openff.toolkit.topology.molecule import Molecule
 
-    # pdb_file = "/home/coda3831/openff-workspace/polymer_examples/compatible_pdbs/simple_polymers/naturalrubber.pdb"
-    # json_file = "/home/coda3831/openff-workspace/openff_polymer_testing/naturalrubber.json"
-    # mol = Topology.from_pdb_and_monomer_info(pdb_file, json_file)
-    # print(mol)
-
-    # python substructure_generator.py -f PEG_PLGA_monomer_input.sdf -n bla -o substructures_new.json
-
-    # pdb_file = "openff_polymer_testing/polymer_examples/rdkit_simple_polymers/PEG_PLGA_heteropolymer.pdb"
-    json_file = "PEG_PLGA_substructures.json"
-    monomer_info = {"PEG": ("[C](-[H])(-[H])(-[H])-[O:1]-[C:2](-[H:3])(-[H:4])-[C:5](-[H:6])(-[H:7])-[O](-[H])", [0,1,2,3,11,12]),
-                    "PLGA1": ("[H]-[O:1]-[C:2](=[O:3])-[C:4](-[H:5])(-[C:6](-[H:7])(-[H:8])(-[H:9]))-[H]",[0,10]),
-                    "PLGA2": ("[H]-[O:1]-[C:2](=[O:3])-[C:4](-[H:5])(-[H:6])-[H]", [0,7])}
+    pdb_file = "polymer_examples/compatible_pdbs/simple_polymers/PEO_PLGA.pdb"
+    json_file = "PEO_PLGA.json"
+    monomer_info = {"PEG": ("[H:1]-[C:2](-[C:3](-[O:4]-[H:5])(-[H:6])-[H:7])(-[H:8])-[H:9]", [0,4]),
+                    "PLGA1": ("[H]-[O]-[C](=[O])-[C](-[H])(-[C](-[H])(-[H])(-[H]))-[H]",[0,10]),
+                    "PLGA2": ("[H]-[O]-[C](=[O])-[C](-[H])(-[H])-[H]", [0,7])}
     engine = SubstructureGenerator()
     for name, substructure_and_caps in monomer_info.items():
         smarts, caps = substructure_and_caps
         engine.add_monomer_as_smarts_fragment(smarts, name, caps)
     engine.output_monomer_info_json(json_file)
 
-    # mol = Molecule().from_pdb_and_monomer_info(pdb_file, json_file)
+    mol = Topology.from_pdb_and_monomer_info(pdb_file, json_file)
 
     # pdb_file = "openff_polymer_testing/polymer_examples/amino_acids/T4-protein.pdb"
     # json_file = "T4_protein_substructures.json"
