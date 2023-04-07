@@ -1,0 +1,15 @@
+	smarts	valid	reason
+0	[#6D4+0:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	True	all checks passed
+1	C(-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	C: required primitive not included
+2	[#6D4:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	[#6&D4:1]: no charge primitive on at least one atom
+3	[#6D4+0:1](-[#1D1:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	[#1&D1:2]: no charge primitive on at least one atom
+4	[#6D4+0:1](-[#1D1+0:2])(-[#1D1+0])(-[#1D1+0:4])-[*:5]	False	[#1&D1&+0]: required primitive not included
+5	[#6D4+0:1](-[#1D1+0:1])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	non-unique atom map numbers
+6	[#6,D4+0:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	zero atomic number with # primitive (likely due to conditionals
+7	[!#6D4+0:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	zero atomic number with # primitive (likely due to conditionals
+8	[#6D4-0:1](-[#1D1-0:2])(-[#1D1-0:3])(-[#1D1-0:4])-[*:5]	True	all checks passed
+9	[#6D3+0:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	[#6&D3&+0:1]: query does not match rdchem.Mol reading of the molecule (likely due to connectivity)
+10	[#6+0:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	[#6&+0:1]: required primitive not included
+11	[#6D4+0:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*D4:5]	False	[D4:5]: found unsupported primitive
+12	[CD4+0:1](-[CD1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	False	[C&D4&+0:1]: required primitive not included
+13	[#6&D4&+0:1](-[#1D1+0:2])(-[#1D1+0:3])(-[#1D1+0:4])-[*:5]	True	all checks passed
