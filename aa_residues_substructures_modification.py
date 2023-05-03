@@ -61,6 +61,7 @@ def _fill_out_query(rdmol):
             if atom.GetAtomMapNum() == 0:
                 atom.SetAtomMapNum(current_map_num)
                 current_map_num += 1
+            atom.SetChiralTag(Chem.rdchem.ChiralType.CHI_UNSPECIFIED)
             a_num = atom.GetAtomicNum()
             D_num = len([0 for _ in atom.GetBonds()])
             F_num = atom.GetFormalCharge()
@@ -120,11 +121,18 @@ with open(substructure_file_path, "r") as subfile:
 
 new_subs_dict = OrderedDict()
 #               = [(Smarts without terminal groups   , [ids to add port to],       [ids to add H to],            [id of amide bond carbon])]
-amino_acid_subs = [(Chem.MolFromSmarts("[N:1]1[C@@:2]([C:3](=[O:4]))([H:9])[C:5]([H:10])([H:11])[C:6]([H:12])([H:13])[C:7]1([H:14])[H:15]"), [0], [], 2),
-                   (Chem.MolFromSmarts("[N+](-[H])(-[H])(-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S:6])([H:9])[H:10])[H:8]"), [], [], 5),
-                   (Chem.MolFromSmarts("[N](-[H])(-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S:6])([H:9])[H:10])[H:8]"), [], [], 4),
-                   (Chem.MolFromSmarts("[N](-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S:6])([H:9])[H:10])[H:8]"), [0], [], 3),
-                   (Chem.MolFromSmarts("[N:1][C@:2]([C:3](=[O:4]))([C:5]([S:6])([H:9])[H:10])[H:8]"), [0,0], [], 2),
+amino_acid_subs = [(Chem.MolFromSmarts("[N+:1](-[H])(-[H])1[C@@:2]([C:3](=[O:4]))([H:9])[C:5]([H:10])([H:11])[C:6]([H:12])([H:13])[C:7]1([H:14])[H:15]"), [], [], 4),
+                   (Chem.MolFromSmarts("[N+0:1](-[H])1[C@@:2]([C:3](=[O:4]))([H:9])[C:5]([H:10])([H:11])[C:6]([H:12])([H:13])[C:7]1([H:14])[H:15]"), [], [], 3),
+                   (Chem.MolFromSmarts("[N+1:1](-[H])1[C@@:2]([C:3](=[O:4]))([H:9])[C:5]([H:10])([H:11])[C:6]([H:12])([H:13])[C:7]1([H:14])[H:15]"), [0], [], 3),
+                   (Chem.MolFromSmarts("[N+0:1]1[C@@:2]([C:3](=[O:4]))([H:9])[C:5]([H:10])([H:11])[C:6]([H:12])([H:13])[C:7]1([H:14])[H:15]"), [0], [], 2),
+                   (Chem.MolFromSmarts("[N+](-[H])(-[H])(-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S+0:6]([H]))([H:9])[H:10])[H:8]"), [], [], 5),
+                   (Chem.MolFromSmarts("[N+](-[H])(-[H])(-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S+0:6])([H:9])[H:10])[H:8]"), [8], [], 5),
+                   (Chem.MolFromSmarts("[N](-[H])(-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S+0:6]([H]))([H:9])[H:10])[H:8]"), [], [], 4),
+                   (Chem.MolFromSmarts("[N](-[H])(-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S+0:6])([H:9])[H:10])[H:8]"), [7], [], 4),
+                   (Chem.MolFromSmarts("[N](-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S+0:6]([H]))([H:9])[H:10])[H:8]"), [0], [], 3),
+                   (Chem.MolFromSmarts("[N](-[H])-[C@:2]([C:3](=[O:4]))([C:5]([S+0:6])([H:9])[H:10])[H:8]"), [0, 6], [], 3),
+                   (Chem.MolFromSmarts("[N:1][C@:2]([C:3](=[O:4]))([C:5]([S+0:6]([H]))([H:9])[H:10])[H:8]"), [0,0], [], 2),
+                   (Chem.MolFromSmarts("[N:1][C@:2]([C:3](=[O:4]))([C:5]([S+0:6])([H:9])[H:10])[H:8]"), [0,0, 5], [], 2),
                    (Chem.MolFromSmarts("[N+](-[H])(-[H])(-[H])-[C@](-[H])(-[*])-[C](=[O])"), [], [], 7),
                    (Chem.MolFromSmarts("[N](-[H])(-[H])-[C@](-[H])(-[*])-[C](=[O])"), [], [], 6),
                    (Chem.MolFromSmarts("[N](-[H])-[C@](-[H])(-[*])-[C](=[O])"), [0], [], 5),
@@ -172,6 +180,7 @@ for res_name, subs in substructure_dictionary.items():
         save_img(f"{res_name}_{res_num}", old_rdmol, rdmol)
         res_num += 1
 
+        sub_smarts = sub_smarts.replace('&', '')
         res_dict[sub_smarts] = atom_names
 
     new_subs_dict[res_name] = res_dict
